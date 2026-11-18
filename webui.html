@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<link rel="icon" type="image/png" href="data:image/png;base64,{{FAVICON}}">
+<title>LAN Share</title>
+<style>
+  /* defaults = dark theme; /theme.css (the PC's current theme) overrides them */
+  :root { --bg:#17191f; --panel:#1f222b; --side:#1d2029; --card:#282c38; --hover:#2c313f; --sel:#2a4880;
+          --text:#e8ecf4; --dim:#929aac; --accent:#4891ff; --accent2:#8a5cf6; --ok:#34d382; --err:#f45c66;
+          --line:#323747; --head1:#1e2a4e; --head2:#341e5c; --page:#ecf0f6; color-scheme:dark; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; background:var(--bg); color:var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans Thai", "Leelawadee UI", sans-serif; }
+  header { position:sticky; top:0; z-index:5; padding:14px 16px 12px;
+    background:linear-gradient(120deg,var(--head1),var(--head2)); border-bottom:1px solid var(--line); }
+  .brand { display:flex; align-items:center; gap:12px; }
+  .logo { width:38px; height:38px; border-radius:11px; display:grid; place-items:center;
+    background:linear-gradient(160deg,var(--accent),var(--accent2)); flex:none; }
+  .brand h1 { font-size:18px; margin:0; }
+  .brand p { margin:2px 0 0; font-size:12.5px; color:var(--dim); }
+  .brand p u { cursor:pointer; text-decoration-style:dotted; }
+  .brand > div:nth-child(2) { flex:1; min-width:0; }
+  .iconbtn { flex:none; width:40px; height:40px; border:0; border-radius:11px; background:var(--card); color:var(--text);
+    display:grid; place-items:center; cursor:pointer; }
+  .iconbtn:hover { background:var(--hover); }
+  .sheet { position:fixed; inset:0; z-index:20; display:none; background:#0008; align-items:flex-end; justify-content:center; }
+  .sheet.open { display:flex; }
+  .sheetbox { width:100%; max-width:560px; max-height:85vh; overflow:auto; background:var(--panel); color:var(--text);
+    border-radius:18px 18px 0 0; padding:16px 16px calc(18px + env(safe-area-inset-bottom)); box-shadow:0 -10px 40px #0006; }
+  .sheethead { display:flex; align-items:center; font-weight:700; font-size:17px; margin-bottom:12px; }
+  .sheethead span { flex:1; }
+  .tgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(96px,1fr)); gap:10px; }
+  .topt { border:2px solid transparent; border-radius:14px; padding:6px; background:var(--card); cursor:pointer; color:var(--text); font:inherit; text-align:center; }
+  .topt.sel { border-color:var(--accent); }
+  .topt .mini { height:46px; border-radius:9px; position:relative; overflow:hidden; margin-bottom:6px; border:1px solid #8883; }
+  .topt .mini i { position:absolute; display:block; border-radius:3px; }
+  .topt small { display:block; font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .tag { display:inline-block; font-size:11px; padding:2px 7px; border-radius:20px; background:var(--card); color:var(--dim); margin-left:6px; vertical-align:2px; }
+  nav { display:flex; flex-wrap:wrap; align-items:center; gap:2px; margin-top:12px; padding:5px 6px;
+    background:var(--card); border-radius:10px; font-size:14px; }
+  nav button { background:none; border:0; color:var(--dim); font:inherit; padding:5px 7px; border-radius:7px; cursor:pointer; }
+  nav button:last-child { color:var(--text); font-weight:600; }
+  nav span { color:var(--dim); }
+  main { padding:8px 10px 120px; max-width:1000px; margin:0 auto; }
+  .row { display:flex; align-items:center; gap:12px; padding:10px 10px; border-radius:10px; text-decoration:none; color:inherit; cursor:pointer; }
+  .row:active, .row:hover { background:var(--hover); }
+  .ico { width:34px; height:34px; flex:none; }
+  .name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:15px; }
+  .meta { color:var(--dim); font-size:12.5px; white-space:nowrap; }
+  .dl { flex:none; width:34px; height:34px; border-radius:9px; display:grid; place-items:center; color:var(--dim); text-decoration:none; }
+  .dl:hover { background:var(--card); color:var(--text); }
+  .empty { text-align:center; color:var(--dim); padding:60px 20px; }
+  .bar { position:fixed; left:0; right:0; bottom:0; padding:12px 14px calc(12px + env(safe-area-inset-bottom));
+    background:var(--panel); border-top:1px solid var(--line); display:flex; gap:10px; align-items:center; }
+  .btn { flex:none; border:0; border-radius:10px; padding:11px 16px; font:600 15px inherit; color:#fff; cursor:pointer;
+    background:linear-gradient(120deg,var(--accent),var(--accent2)); text-decoration:none; }
+  .btn.ghost { background:var(--card); color:var(--text); font-weight:500; }
+  .status { flex:1; min-width:0; font-size:13px; color:var(--dim); }
+  .prog { height:5px; border-radius:3px; background:var(--card); margin-top:6px; overflow:hidden; display:none; }
+  .prog i { display:block; height:100%; width:0; background:linear-gradient(90deg,var(--accent),var(--accent2)); }
+
+  /* Markdown pages (README banner and viewer) */
+  .banner { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:6px 18px; margin:6px 0 12px; }
+  .md { line-height:1.65; font-size:16px; overflow-wrap:anywhere; }
+  .md h1,.md h2,.md h3 { line-height:1.3; margin:1.1em 0 .5em; }
+  .md h1 { font-size:1.9em; background:linear-gradient(90deg,var(--accent),var(--accent2)); -webkit-background-clip:text; background-clip:text; color:transparent; }
+  .md h2 { font-size:1.45em; border-bottom:1px solid var(--line); padding-bottom:.25em; }
+  .md a { color:var(--accent); }
+  .md img, .md video { max-width:100%; border-radius:12px; display:block; margin:12px auto; }
+  .md video { background:#000; }
+  .md video { width:100%; }
+  .md audio { width:100%; margin:8px 0; }
+  .md figure { margin:14px 0; } .md figcaption { text-align:center; color:var(--dim); font-size:14px; }
+  .md .pdf { margin:12px 0; } .md .pdf iframe { width:100%; height:75vh; border:0; border-radius:12px; background:#fff; }
+  .md .pdf a { display:inline-block; margin-top:6px; }
+  .md blockquote { margin:12px 0; padding:8px 16px; border-left:4px solid var(--accent); background:var(--panel); border-radius:0 10px 10px 0; color:var(--text); }
+  .md code { background:var(--card); padding:2px 6px; border-radius:6px; font-size:.9em; }
+  .md pre { background:var(--card); padding:12px 14px; border-radius:10px; overflow:auto; } .md pre code { padding:0; background:none; }
+  .md table { border-collapse:collapse; width:100%; margin:12px 0; } .md th,.md td { border:1px solid var(--line); padding:8px 10px; text-align:left; }
+  .md th { background:var(--panel); } .md hr { border:0; border-top:1px solid var(--line); margin:22px 0; }
+  .md ul,.md ol { padding-left:1.4em; }
+
+  /* viewer */
+  #viewer { display:none; }
+  .vbar { position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:10px; padding:10px 14px;
+    background:var(--panel); border-bottom:1px solid var(--line); }
+  .vbar .t { flex:1; min-width:0; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .vbody { max-width:960px; margin:0 auto; padding:10px 16px 60px; }
+  .vbody > img, .vbody > video { display:block; max-width:100%; max-height:85vh; margin:20px auto; border-radius:12px; }
+  .vbody > iframe { width:100%; height:85vh; border:0; border-radius:12px; background:#fff; margin-top:14px; }
+  body.kiosk .vbar { display:none; }
+  body.kiosk .vbody { max-width:none; padding:0 4vw 4vh; }
+  body.kiosk .vbody > img, body.kiosk .vbody > video { max-height:100vh; margin:0 auto; border-radius:0; }
+  body.kiosk .md { font-size:clamp(18px, 2.2vw, 34px); }
+</style>
+<script>
+/* theme chosen on this phone: "pc" (follow the computer, default), "auto"
+   (follow the phone's light/dark mode) or a theme name. Applied before the
+   first paint so the page never flashes in another theme. */
+function themeChoice() { try { return localStorage.getItem("lanshare.theme") || "pc"; } catch (e) { return "pc"; } }
+function themeHref(c) {
+  if (c === "auto") return "/theme.css?name=" + (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+  if (c && c !== "pc") return "/theme.css?name=" + encodeURIComponent(c);
+  return "/theme.css?t=" + Date.now();
+}
+document.write('<link rel="stylesheet" id="themecss" href="' + themeHref(themeChoice()) + '">');
+</script>
+</head>
+<body>
+<div id="browser">
+  <header>
+    <div class="brand">
+      <div class="logo"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round">
+        <path d="M12 12L5 5M12 12l7-7M12 12l-7 7M12 12l7 7"/><circle cx="12" cy="12" r="3.4" fill="#fff"/>
+        <circle cx="5" cy="5" r="2.2" fill="#fff"/><circle cx="19" cy="5" r="2.2" fill="#fff"/>
+        <circle cx="5" cy="19" r="2.2" fill="#fff"/><circle cx="19" cy="19" r="2.2" fill="#fff"/></svg></div>
+      <div><h1><span id="pcname">LAN Share</span><span class="tag">แชร์สาธารณะ</span></h1><p id="sub">กำลังเชื่อมต่อ...</p></div>
+      <button class="iconbtn" id="themebtn" title="ธีม" aria-label="เลือกธีม"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 0 18c1.1 0 1.6-.8 1.6-1.6
+        0-.5-.2-.9-.5-1.2-.3-.3-.5-.7-.5-1.2 0-.9.7-1.6 1.6-1.6H16a5 5 0 0 0 5-5C21 6.5 17 3 12 3z"/><circle cx="7.5" cy="11" r="1.2"
+        fill="currentColor"/><circle cx="10.5" cy="7" r="1.2" fill="currentColor"/><circle cx="15" cy="7.5" r="1.2" fill="currentColor"/></svg></button>
+    </div>
+    <nav id="crumbs"></nav>
+  </header>
+  <main><div id="banner"></div><div id="list"></div></main>
+  <div class="bar">
+    <div class="status"><div id="status">แตะโฟลเดอร์เพื่อเปิด แตะไฟล์เพื่อดู/ดาวน์โหลด</div><div class="prog" id="prog"><i id="progi"></i></div></div>
+    <button class="btn" id="sendbtn">ส่งไฟล์</button>
+    <input type="file" id="picker" multiple hidden>
+  </div>
+</div>
+
+<div class="sheet" id="sheet">
+  <div class="sheetbox">
+    <div class="sheethead"><span>ธีมของหน้านี้</span><button class="iconbtn" id="sheetclose" aria-label="ปิด">✕</button></div>
+    <div class="tgrid" id="tgrid"></div>
+  </div>
+</div>
+
+<div id="viewer">
+  <div class="vbar">
+    <a class="btn ghost" id="vback" href="/">‹ กลับ</a>
+    <div class="t" id="vtitle"></div>
+    <a class="btn ghost" id="vkiosk" title="เปิดแบบจอโฆษณา: เต็มจอ ไม่มีแถบ อัปเดตเองทุก 30 วินาที">จอโฆษณา</a>
+    <button class="btn ghost" id="vfull" title="เต็มจอ">⛶</button>
+    <a class="btn" id="vdl">ดาวน์โหลด</a>
+  </div>
+  <div class="vbody" id="vbody"></div>
+</div>
+
+<script>
+"use strict";
+var ua = navigator.userAgent;
+var me = localStorage.getItem("lanshare.name") ||
+  (/Android/.test(ua) ? "มือถือ Android" : /iPhone|iPad/.test(ua) ? "iPhone/iPad" : "เบราว์เซอร์");
+var cur = "";
+var $ = function (id) { return document.getElementById(id); };
+var PREVIEW = /\.(md|markdown|png|jpe?g|gif|webp|svg|pdf|mp4|webm|m4v|mov|mp3|m4a|wav|ogg|txt)$/i;
+
+function fmt(b) {
+  if (b < 1024) return b + " B";
+  if (b < 1048576) return (b / 1024).toFixed(1) + " KB";
+  if (b < 1073741824) return (b / 1048576).toFixed(1) + " MB";
+  return (b / 1073741824).toFixed(2) + " GB";
+}
+function api(path, params) {
+  var q = Object.keys(params || {}).map(function (k) { return encodeURIComponent(k) + "=" + encodeURIComponent(params[k]); }).join("&");
+  return "/api/" + path + (q ? "?" + q : "");
+}
+function fileUrl(path, dl) { return api("file", dl ? { path: path, dl: 1, client: me } : { path: path, client: me }); }
+function viewUrl(path, kiosk) { return "/view?path=" + encodeURIComponent(path) + (kiosk ? "&kiosk=1" : ""); }
+function dirOf(path) { var i = path.lastIndexOf("/"); return i < 0 ? "" : path.slice(0, i); }
+function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); }
+function unesc(s) { return s.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&"); }
+
+/* ---------- Markdown ---------- */
+/* path written in a .md file -> path inside the shares (null = external link) */
+function resolvePath(base, rel) {
+  if (/^[a-z][a-z0-9+.-]*:/i.test(rel)) return null;
+  var parts = rel.charAt(0) === "/" ? [] : (base ? base.split("/") : []);
+  rel.replace(/^\//, "").split(/[?#]/)[0].split("/").forEach(function (p) {
+    if (p === "" || p === ".") return;
+    if (p === "..") parts.pop(); else { try { parts.push(decodeURIComponent(p)); } catch (e) { parts.push(p); } }
+  });
+  return parts.join("/");
+}
+function media(path, alt) {
+  var u = esc(fileUrl(path)), ext = (path.split(".").pop() || "").toLowerCase(), cap = alt ? "<figcaption>" + alt + "</figcaption>" : "";
+  if (/^(mp4|webm|m4v|mov)$/.test(ext))
+    return "<figure><video src=\"" + u + "\" controls autoplay muted loop playsinline preload=\"metadata\"></video>" + cap + "</figure>";
+  if (/^(mp3|m4a|wav|ogg)$/.test(ext)) return "<audio src=\"" + u + "\" controls></audio>";
+  if (ext === "pdf")
+    return "<div class=\"pdf\"><iframe src=\"" + u + "#view=FitH\" loading=\"lazy\"></iframe><a class=\"btn ghost\" href=\"" + u + "\" target=\"_blank\">เปิด PDF" + (alt ? ": " + alt : "") + "</a></div>";
+  return "<img src=\"" + u + "\" alt=\"" + alt + "\" loading=\"lazy\">";
+}
+function inline(t, base) {
+  var keep = [];
+  var hold = function (html) { keep.push(html); return "\u0001" + (keep.length - 1) + "\u0002"; };
+  t = t.replace(/`([^`]+)`/g, function (m, c) { return hold("<code>" + esc(c) + "</code>"); });
+  t = esc(t);
+  t = t.replace(/!\[([^\]]*)\]\(\s*([^)\s]+)(?:\s+&quot;[^&]*&quot;)?\s*\)/g, function (m, alt, src) {
+    src = unesc(src);
+    var p = resolvePath(base, src);
+    if (p === null) return /^https?:/i.test(src) ? hold("<img src=\"" + esc(src) + "\" alt=\"" + alt + "\" loading=\"lazy\">") : m;
+    return hold(media(p, alt));
+  });
+  t = t.replace(/\[([^\]]+)\]\(\s*([^)\s]+)\s*\)/g, function (m, text, href) {
+    href = unesc(href);
+    var p = resolvePath(base, href);
+    if (p === null) {
+      if (!/^(https?|mailto):/i.test(href)) return text;          // no javascript: etc.
+      return hold("<a href=\"" + esc(href) + "\" target=\"_blank\" rel=\"noopener\">") + text + hold("</a>");
+    }
+    var url = PREVIEW.test(p) ? viewUrl(p) : fileUrl(p, true);
+    return hold("<a href=\"" + esc(url) + "\">") + text + hold("</a>");
+  });
+  t = t.replace(/(^|[\s(])(https?:\/\/[^\s<]+)/g, function (m, pre, u) {
+    return pre + hold("<a href=\"" + u + "\" target=\"_blank\" rel=\"noopener\">" + u + "</a>");
+  });
+  t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/__([^_]+)__/g, "<strong>$1</strong>")
+       .replace(/\*([^*\s][^*]*)\*/g, "<em>$1</em>").replace(/(^|\W)_([^_\s][^_]*)_(?=\W|$)/g, "$1<em>$2</em>")
+       .replace(/~~([^~]+)~~/g, "<del>$1</del>");
+  t = t.replace(/ {2,}\n/g, "<br>").replace(/\n/g, " ");
+  return t.replace(/\u0001(\d+)\u0002/g, function (m, i) { return keep[+i]; });
+}
+var LIST = /^\s*([-*+]|\d+[.)])\s+/;
+function md(src, base) {
+  var lines = src.replace(/\r\n?/g, "\n").split("\n"), out = [], i = 0, m;
+  var isTableSep = function (l) { return /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(l); };
+  var cells = function (l) { return l.trim().replace(/^\||\|$/g, "").split("|").map(function (c) { return inline(c.trim(), base); }); };
+  while (i < lines.length) {
+    var l = lines[i];
+    if (/^\s*```/.test(l)) {
+      var code = []; i++;
+      while (i < lines.length && !/^\s*```/.test(lines[i])) code.push(lines[i++]);
+      i++; out.push("<pre><code>" + esc(code.join("\n")) + "</code></pre>"); continue;
+    }
+    if ((m = /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(l))) { out.push("<h" + m[1].length + ">" + inline(m[2], base) + "</h" + m[1].length + ">"); i++; continue; }
+    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(l)) { out.push("<hr>"); i++; continue; }
+    if (/^\s*>/.test(l)) {
+      var q = []; while (i < lines.length && /^\s*>/.test(lines[i])) q.push(lines[i++].replace(/^\s*>\s?/, ""));
+      out.push("<blockquote>" + md(q.join("\n"), base) + "</blockquote>"); continue;
+    }
+    if (LIST.test(l)) {
+      var ordered = /^\s*\d/.test(l), items = [];
+      while (i < lines.length && LIST.test(lines[i])) {
+        items.push(lines[i++].replace(LIST, ""));
+        while (i < lines.length && /^\s{2,}\S/.test(lines[i]) && !LIST.test(lines[i])) items[items.length - 1] += "\n" + lines[i++].trim();
+      }
+      var tag = ordered ? "ol" : "ul";
+      out.push("<" + tag + ">" + items.map(function (x) {
+        var box = /^\[( |x)\]\s+/i.exec(x);
+        if (box) x = x.slice(box[0].length);
+        return "<li>" + (box ? (box[1] === " " ? "☐ " : "☑ ") : "") + inline(x, base) + "</li>";
+      }).join("") + "</" + tag + ">");
+      continue;
+    }
+    if (l.indexOf("|") >= 0 && i + 1 < lines.length && isTableSep(lines[i + 1])) {
+      var head = cells(l); i += 2;
+      var body = []; while (i < lines.length && lines[i].indexOf("|") >= 0 && lines[i].trim()) body.push(cells(lines[i++]));
+      out.push("<table><thead><tr>" + head.map(function (c) { return "<th>" + c + "</th>"; }).join("") + "</tr></thead><tbody>" +
+        body.map(function (r) { return "<tr>" + r.map(function (c) { return "<td>" + c + "</td>"; }).join("") + "</tr>"; }).join("") + "</tbody></table>");
+      continue;
+    }
+    if (!l.trim()) { i++; continue; }
+    var p = [];
+    while (i < lines.length && lines[i].trim() && !/^\s*(#{1,6}\s|```|>)/.test(lines[i]) && !LIST.test(lines[i])
+           && !(lines[i].indexOf("|") >= 0 && i + 1 < lines.length && isTableSep(lines[i + 1]))) p.push(lines[i++]);
+    out.push("<p>" + inline(p.join("\n"), base) + "</p>");
+  }
+  return out.join("\n");
+}
+
+/* ---------- browser (folder list) ---------- */
+function icon(isDir, name) {
+  if (isDir) return '<svg class="ico" viewBox="0 0 34 34"><path d="M3 9a3 3 0 0 1 3-3h8l3 3h11a3 3 0 0 1 3 3v2H3z" fill="#d69124"/><rect x="3" y="11" width="28" height="18" rx="3" fill="#fcc24f"/></svg>';
+  var e = (name.split(".").pop() || "").slice(0, 4).toUpperCase();
+  var c = /^(JPG|JPEG|PNG|GIF|WEBP|HEIC)$/.test(e) ? "#2ecc71" : /^(MP4|MKV|MOV|AVI|WEBM)$/.test(e) ? "#9b59b6" :
+          /^(MP3|WAV|FLAC|M4A|OGG)$/.test(e) ? "#e84393" : /^(ZIP|RAR|7Z|GZ|TAR)$/.test(e) ? "#f39c12" :
+          e === "PDF" ? "#e74c3c" : e === "MD" ? "#00b4d8" : /^(DOC|DOCX|TXT)$/.test(e) ? "#3498db" : /^(XLS|XLSX|CSV)$/.test(e) ? "#27ae60" : "#828c9b";
+  return '<svg class="ico" viewBox="0 0 34 34"><path d="M7 2h14l7 7v23H7z" fill="var(--page)"/><path d="M21 2l7 7h-7z" fill="#bec6d4"/>' +
+    '<rect x="3" y="18" width="22" height="10" rx="2" fill="' + c + '"/><text x="14" y="25.6" font-size="6.5" font-weight="700" ' +
+    'font-family="Arial" fill="#fff" text-anchor="middle">' + e.replace(/[<>&]/g, "") + "</text></svg>";
+}
+var DLICON = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5M4 17v3h16v-3"/></svg>';
+function crumbs() {
+  var nav = $("crumbs"); nav.innerHTML = "";
+  var parts = cur ? cur.split("/") : [];
+  var add = function (label, path) {
+    var b = document.createElement("button"); b.textContent = label;
+    b.onclick = function () { go(path); }; nav.appendChild(b);
+  };
+  add("ทั้งหมด", "");
+  parts.forEach(function (p, i) {
+    var s = document.createElement("span"); s.textContent = "›"; nav.appendChild(s);
+    add(p, parts.slice(0, i + 1).join("/"));
+  });
+}
+function showBanner(path, items) {
+  var b = $("banner"); b.innerHTML = "";
+  var readme = items.filter(function (it) { return !it.dir && /^(readme|index)\.(md|markdown)$/i.test(it.name); })[0];
+  if (!readme) return;
+  var full = path ? path + "/" + readme.name : readme.name;
+  fetch(fileUrl(full)).then(function (r) { return r.ok ? r.text() : ""; }).then(function (t) {
+    if (!t || cur !== path) return;
+    b.innerHTML = '<div class="banner md">' + md(t, path) + "</div>";
+  });
+}
+function go(path) {
+  cur = path; crumbs();
+  var list = $("list"); list.innerHTML = '<div class="empty">กำลังโหลด...</div>'; $("banner").innerHTML = "";
+  fetch(api("list", { path: path, client: me })).then(function (r) { return r.json(); }).then(function (d) {
+    if (d.error) { list.innerHTML = ""; var e = document.createElement("div"); e.className = "empty"; e.textContent = d.error; list.appendChild(e); return; }
+    d.items.sort(function (a, b) { return (b.dir - a.dir) || a.name.localeCompare(b.name); });
+    showBanner(path, d.items);
+    list.innerHTML = d.items.length ? "" : '<div class="empty">' + (path ? "โฟลเดอร์นี้ว่างเปล่า" : "เครื่องนี้ยังไม่ได้แชร์อะไร") + "</div>";
+    d.items.forEach(function (it) {
+      var full = path ? path + "/" + it.name : it.name;
+      var a = document.createElement("a"); a.className = "row";
+      if (it.dir) { a.href = "#"; a.onclick = function (ev) { ev.preventDefault(); go(full); }; }
+      else if (PREVIEW.test(it.name)) a.href = viewUrl(full);
+      else { a.href = fileUrl(full, true); a.setAttribute("download", it.name); }
+      a.innerHTML = icon(it.dir, it.name) + '<div class="name"></div><div class="meta"></div>';
+      a.querySelector(".name").textContent = it.name;
+      a.querySelector(".meta").textContent = it.dir ? "โฟลเดอร์" : fmt(it.size);
+      if (!it.dir) {
+        var dl = document.createElement("a"); dl.className = "dl"; dl.href = fileUrl(full, true);
+        dl.setAttribute("download", it.name); dl.title = "ดาวน์โหลด"; dl.innerHTML = DLICON;
+        dl.onclick = function (ev) { ev.stopPropagation(); };
+        a.appendChild(dl);
+      }
+      list.appendChild(a);
+    });
+    history.replaceState(null, "", "/#" + encodeURIComponent(path));
+  }).catch(function () { list.innerHTML = '<div class="empty">เชื่อมต่อไม่ได้</div>'; });
+}
+
+/* ---------- viewer ---------- */
+function startViewer() {
+  var q = new URLSearchParams(location.search), path = q.get("path") || "", kiosk = q.get("kiosk") === "1";
+  $("browser").style.display = "none"; $("viewer").style.display = "block";
+  if (kiosk) document.body.classList.add("kiosk");
+  var name = path.split("/").pop();
+  document.title = name + " — LAN Share";
+  $("vtitle").textContent = name;
+  $("vback").href = "/#" + encodeURIComponent(dirOf(path));
+  $("vdl").href = fileUrl(path, true); $("vdl").setAttribute("download", name);
+  $("vkiosk").href = viewUrl(path, true);
+  $("vfull").onclick = function () { (document.documentElement.requestFullscreen || function () {}).call(document.documentElement); };
+  var body = $("vbody"), ext = (name.split(".").pop() || "").toLowerCase(), last = "";
+  var load = function () {
+    if (/^(md|markdown|txt)$/.test(ext)) {
+      fetch(fileUrl(path)).then(function (r) { if (!r.ok) throw new Error(r.status); return r.text(); }).then(function (t) {
+        if (t === last) return;               // unchanged: keep videos playing
+        last = t;
+        body.innerHTML = ext === "txt" ? "<pre class=\"md\">" + esc(t) + "</pre>" : '<article class="md">' + md(t, dirOf(path)) + "</article>";
+      }).catch(function () { if (!last) body.innerHTML = '<div class="empty">เปิดไม่ได้ (ไฟล์ถูกลบหรือเลิกแชร์แล้ว)</div>'; });
+    } else if (!last) {
+      last = "x";
+      body.innerHTML = media(path, "");
+      var el = body.firstElementChild;
+      if (el && el.tagName === "FIGURE") body.innerHTML = el.innerHTML;       // bare <video>
+      if (ext === "pdf") body.innerHTML = '<iframe src="' + esc(fileUrl(path)) + '"></iframe>';
+    }
+  };
+  load();
+  // advert screens: pick up edits of the page every 30 seconds
+  if (kiosk) { setInterval(load, 30000); document.body.onclick = function () { $("vfull").onclick(); }; }
+}
+
+/* ---------- upload ---------- */
+function status(t, pct) {
+  $("status").textContent = t;
+  $("prog").style.display = pct === undefined ? "none" : "block";
+  if (pct !== undefined) $("progi").style.width = Math.round(pct * 100) + "%";
+}
+function put(url, file, onp) {
+  return new Promise(function (ok, bad) {
+    var x = new XMLHttpRequest(); x.open("PUT", url);
+    x.setRequestHeader("X-LanShare-Name", encodeURIComponent(me));
+    x.upload.onprogress = function (e) { onp(e.loaded); };
+    x.onload = function () { x.status === 200 ? ok() : bad(new Error(x.responseText)); };
+    x.onerror = function () { bad(new Error("network")); };
+    x.send(file);
+  });
+}
+$("sendbtn").onclick = function () { $("picker").click(); };
+$("picker").onchange = async function () {
+  var files = Array.prototype.slice.call(this.files); this.value = "";
+  if (!files.length) return;
+  var total = files.reduce(function (s, f) { return s + f.size; }, 0), done = 0;
+  try {
+    status("รอให้คอมพิวเตอร์กดยอมรับ...");
+    var r = await fetch(api("push/begin", { files: files.length, bytes: total, client: me }), { method: "POST" });
+    var d = await r.json();
+    if (!r.ok) { status(d.error === "rejected" ? "คอมพิวเตอร์ปฏิเสธการรับไฟล์" : "ส่งไม่ได้: " + d.error); return; }
+    for (var i = 0; i < files.length; i++) {
+      var f = files[i], base = done;
+      await put(api("push/file", { token: d.token, path: f.name }), f, function (n) {
+        status("กำลังส่ง " + f.name + " (" + (i + 1) + "/" + files.length + ")", (base + n) / Math.max(1, total));
+      });
+      done += f.size;
+    }
+    await fetch(api("push/end", { token: d.token }), { method: "POST" });
+    status("ส่งสำเร็จ " + files.length + " ไฟล์ (" + fmt(total) + ")", 1);
+  } catch (e) { status("ส่งไม่สำเร็จ: " + e.message); }
+};
+
+function showInfo() {
+  fetch("/api/info").then(function (r) { return r.json(); }).then(function (i) {
+    var nm = i.name || location.hostname;   // no name set: show the address
+    $("pcname").textContent = nm; document.title = nm + " — LAN Share";
+    var sub = $("sub"); sub.innerHTML = "";
+    sub.appendChild(document.createTextNode("แชร์ไว้ " + i.shares + " รายการ • คุณ: "));
+    var u = document.createElement("u"); u.textContent = me; u.title = "เปลี่ยนชื่อที่แสดง";
+    u.onclick = function () {
+      var n = prompt("ชื่อที่เครื่องอื่นจะเห็น", me);
+      if (n && n.trim()) { me = n.trim().slice(0, 40); localStorage.setItem("lanshare.name", me); showInfo(); }
+    };
+    sub.appendChild(u);
+  });
+}
+
+/* ---------- theme ---------- */
+/* swap the stylesheet without flicker: the old one goes only after the new one loaded */
+function loadTheme() {
+  var old = $("themecss"), link = document.createElement("link");
+  link.rel = "stylesheet"; link.href = themeHref(themeChoice());
+  link.onload = function () { old.remove(); link.id = "themecss"; };
+  link.onerror = function () { link.remove(); };
+  old.after(link);
+}
+function setChoice(c) {
+  try { localStorage.setItem("lanshare.theme", c); } catch (e) {}
+  loadTheme(); buildThemeGrid();
+}
+var themes = null;
+function mini(t) {
+  return '<div class="mini" style="background:' + t.bg + '"><i style="left:0;top:0;bottom:0;width:30%;background:' + t.side + '"></i>' +
+    '<i style="left:36%;top:9px;width:50%;height:5px;background:' + t.dim + '"></i>' +
+    '<i style="left:36%;top:19px;width:36%;height:5px;background:' + t.text + '"></i>' +
+    '<i style="right:6px;bottom:6px;width:26px;height:9px;background:linear-gradient(90deg,' + t.accent + ',' + t.accent2 + ')"></i></div>';
+}
+function buildThemeGrid() {
+  var g = $("tgrid"), c = themeChoice(); g.innerHTML = "";
+  var add = function (key, label, html) {
+    var b = document.createElement("button"); b.className = "topt" + (c === key ? " sel" : "");
+    b.innerHTML = html + "<small></small>"; b.querySelector("small").textContent = label;
+    b.onclick = function () { setChoice(key); };
+    g.appendChild(b);
+  };
+  add("pc", "ตามเครื่อง", '<div class="mini" style="background:linear-gradient(120deg,var(--head1),var(--head2))">' +
+    '<i style="left:50%;top:50%;width:22px;height:16px;margin:-8px 0 0 -11px;border:2px solid var(--text);background:none"></i></div>');
+  add("auto", "ตามมือถือ", '<div class="mini" style="background:linear-gradient(135deg,#17191f 50%,#f6f7fa 50%)"></div>');
+  (themes || []).forEach(function (t) { add(t.name, t.label, mini(t)); });
+}
+$("themebtn").onclick = function () {
+  $("sheet").classList.add("open");
+  if (themes) return buildThemeGrid();
+  buildThemeGrid();
+  fetch("/api/themes").then(function (r) { return r.json(); }).then(function (l) { themes = l; buildThemeGrid(); });
+};
+$("sheetclose").onclick = function () { $("sheet").classList.remove("open"); };
+$("sheet").onclick = function (e) { if (e.target === this) this.classList.remove("open"); };
+// "ตามเครื่อง": pick up theme changes on the computer every 10 seconds
+setInterval(function () { if (themeChoice() === "pc") loadTheme(); }, 10000);
+// "ตามมือถือ": follow the phone switching between light and dark
+matchMedia("(prefers-color-scheme: light)").addEventListener("change", function () { if (themeChoice() === "auto") loadTheme(); });
+
+if (location.pathname === "/view") startViewer();
+else { showInfo(); go(decodeURIComponent((location.hash || "#").slice(1))); }
+</script>
+</body>
+</html>
