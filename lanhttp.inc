@@ -17,6 +17,13 @@
     POST /api/push/begin?files=&bytes=     ask to send files -> token
     PUT  /api/push/file?token=&path=       upload one file (body = content)
     POST /api/push/end?token=              finish the upload
+    Read + Write shares only ("writable" in /api/list); every request needs the
+    header  X-LanShare-Write: 1  (a web page on another site cannot send it):
+    POST /api/mkdir?path=Share/sub/new     new folder
+    POST /api/delete?path=Share/sub/x      to the owner's Recycle Bin
+    POST /api/rename?path=Share/sub/x&to=y
+    PUT  /api/upload?path=Share/sub&name=file.jpg   (body = content; an existing
+         name gets " (1)") -> {"ok":true,"name":"file (1).jpg"}
 
   Security: same as the binary protocol (read-only shares, no '..').
   Requests whose Host header is a domain name are refused, so a web page on
@@ -262,6 +269,20 @@ procedure TServeThread.HandleHttp(const First: string);
 var
   R: THttpReq;
   Css: string;
+
+  { refused before the body was read (e.g. an upload to a read-only folder):
+    read the rest away, so the client gets the answer instead of a reset }
+  procedure DrainInput;
+  var
+    Buf: array[0..65535] of Byte;
+    T0: QWord;
+  begin
+    fpshutdown(FSock, 1);
+    SetTimeout(FSock, 1000);
+    T0 := GetTickCount64;
+    while (fprecv(FSock, @Buf[0], SizeOf(Buf), 0) > 0) and (GetTickCount64 - T0 < 5000) do ;
+  end;
+
 begin
   R := Default(THttpReq);
   R.Params := TStringList.Create;
@@ -272,7 +293,11 @@ begin
       HttpReadHead(First, R);
       FPeerName := UrlDecode(R.Headers.Values['x-lanshare-name'], False);
       if FPeerName = '' then FPeerName := R.Params.Values['client'];
-      if FPeerName = '' then FPeerName := 'เบราว์เซอร์ ' + FPeerIP;
+      if FPeerName = '' then
+        if Pos('Mozilla', R.Headers.Values['user-agent']) > 0 then
+          FPeerName := L('Browser ', 'เบราว์เซอร์ ') + FPeerIP
+        else
+          FPeerName := FPeerIP;    // another LAN Share without a name
       FHttpHead := R.Method = 'HEAD';
       if not HostAllowed(R.Headers.Values['host']) then
         raise EHttp.CreateCode(403, 'Host not allowed');
@@ -280,7 +305,9 @@ begin
         HttpSend(204, 'text/plain', '', 'Allow: GET, HEAD, POST, PUT'#13#10)
       else if ((R.Path = '/') or (R.Path = '/index.html') or (R.Path = '/view'))
         and ((R.Method = 'GET') or (R.Method = 'HEAD')) then
-        HttpSend(200, 'text/html; charset=utf-8', WebUIHtml)
+        // the page speaks the PC's language
+        HttpSend(200, 'text/html; charset=utf-8',
+          StringReplace(WebUIHtml, '<html lang="en">', '<html lang="' + FOwner.Lang + '">', []))
       else if R.Path = '/theme.css' then
       begin
         Css := '';
@@ -314,6 +341,18 @@ begin
         if R.Method <> 'POST' then raise EHttp.CreateCode(405, 'use POST');
         HttpPushEnd(R);
       end
+      else if (R.Path = '/api/mkdir') or (R.Path = '/api/delete') or (R.Path = '/api/rename') then
+      begin
+        if R.Method <> 'POST' then raise EHttp.CreateCode(405, 'use POST');
+        HttpWriteCheck(R);
+        HttpWriteOp(R);
+      end
+      else if R.Path = '/api/upload' then
+      begin
+        if (R.Method <> 'PUT') and (R.Method <> 'POST') then raise EHttp.CreateCode(405, 'use PUT');
+        HttpWriteCheck(R);
+        HttpUpload(R);
+      end
       else
         raise EHttp.CreateCode(404, 'not found: ' + R.Path);
     except
@@ -322,6 +361,7 @@ begin
         try
           if E is EHttp then HttpError(EHttp(E).Code, E.Message)
           else HttpError(400, E.Message);
+          if R.ContentLength > 0 then DrainInput;
         except
           // client already gone
         end;
@@ -342,11 +382,105 @@ begin
     ',"name":' + JsonStr(FOwner.MyName) +
     ',"icon":' + JsonStr(FOwner.MyIcon) +
     ',"theme":"/theme.css"' +
+    ',"lang":' + JsonStr(FOwner.Lang) +
     ',"os":' + JsonStr(GetOSName) +
     ',"port":' + IntToStr(FOwner.Port) +
-    ',"caps":["bin","http","push"]' +
+    ',"caps":["bin","http","push","write"]' +
     ',"shares":' + IntToStr(FOwner.Shares.Count) +
     ',"autoAccept":' + JsonBool(FOwner.AutoAccept) + '}');
+end;
+
+{ Changes need a header that only a script on this page can add: another
+  web site cannot send it without a CORS preflight, which is never allowed
+  (no Access-Control-* headers), so it cannot change files behind the
+  user's back (CSRF). A cross-site Origin is refused as well. }
+procedure TServeThread.HttpWriteCheck(const R: THttpReq);
+var
+  O: string;
+begin
+  if R.Headers.Values['x-lanshare-write'] <> '1' then
+    raise EHttp.CreateCode(403, 'X-LanShare-Write header required');
+  O := LowerCase(R.Headers.Values['origin']);
+  if (O <> '') and (O <> 'http://' + LowerCase(R.Headers.Values['host'])) then
+    raise EHttp.CreateCode(403, 'cross-site request refused');
+end;
+
+procedure TServeThread.HttpWriteOp(const R: THttpReq);
+var
+  Path, OpMsg: string;
+begin
+  Path := CleanVPath(R.Params.Values['path']);
+  if Path = '' then raise EHttp.CreateCode(400, 'path is required');
+  try
+    if R.Path = '/api/mkdir' then OpMsg := WriteMkdir(Path)
+    else if R.Path = '/api/delete' then OpMsg := WriteDelete(Path)
+    else OpMsg := WriteRename(Path, R.Params.Values['to']);
+  except
+    on E: ENetError do raise EHttp.CreateCode(403, E.Message);
+  end;
+  HttpSend(200, 'application/json; charset=utf-8', '{"ok":true}');
+end;
+
+procedure TServeThread.HttpUpload(const R: THttpReq);
+var
+  Folder, Local, Name, Target, Tmp, H: string;
+  IsRoot: Boolean;
+  FS: TFileStream;
+  Left: Int64;
+  Buf: array of Byte;
+  N: Integer;
+begin
+  Folder := CleanVPath(R.Params.Values['path']);
+  Name := R.Params.Values['name'];
+  if not (FOwner.Shares.ResolveWrite(Folder, Local, IsRoot) and DirectoryExists(Local)) or
+     not ValidNewName(Name) then
+    raise EHttp.CreateCode(403, L(NO_WRITE_EN, NO_WRITE_TH));
+  if R.ContentLength < 0 then raise EHttp.CreateCode(411, 'Content-Length is required');
+  if LowerCase(R.Headers.Values['expect']) = '100-continue' then
+  begin
+    H := 'HTTP/1.1 100 Continue'#13#10#13#10;
+    SockSendAll(FSock, H[1], Length(H));
+  end;
+  Name := UniqueName(IncludeTrailingPathDelimiter(Local), Name);   // never overwrite
+  Target := IncludeTrailingPathDelimiter(Local) + Name;
+  Tmp := Target + '.lanshare-part';
+  FKind := tkReceive;
+  FTitle := Name;
+  FTotal := R.ContentLength;
+  FFileCount := 1;
+  SetState(tsRunning, '');
+  try
+    FS := TFileStream.Create(Tmp, fmCreate);
+    try
+      SetLength(Buf, BUF_SIZE);
+      Left := R.ContentLength;
+      while Left > 0 do
+      begin
+        if Terminated then raise ENetError.Create(L('Cancelled', 'ยกเลิกแล้ว'));
+        if Left > BUF_SIZE then N := BUF_SIZE else N := Left;
+        N := fprecv(FSock, @Buf[0], N, 0);
+        if N <= 0 then raise ENetError.Create(L('Connection lost', 'การเชื่อมต่อขาด'));
+        FS.WriteBuffer(Buf[0], N);
+        Dec(Left, N);
+        Inc(FDone, N);
+        Report;
+      end;
+    finally
+      FS.Free;
+    end;
+    if not RenameFile(Tmp, Target) then
+      raise ENetError.Create(L('Cannot save the file', 'บันทึกไฟล์ไม่ได้'));
+    SetState(tsDone, L('Received', 'รับสำเร็จ'));
+    Log(Format(L('%s added %s to %s', '%s เพิ่ม %s ใน %s'), [FPeerName, Name, Folder]));
+  except
+    on E: Exception do
+    begin
+      SysUtils.DeleteFile(Tmp);
+      SetState(tsFailed, E.Message);
+      raise;
+    end;
+  end;
+  HttpSend(200, 'application/json; charset=utf-8', '{"ok":true,"name":' + JsonStr(Name) + '}');
 end;
 
 procedure TServeThread.HttpList(const R: THttpReq);
@@ -354,6 +488,7 @@ var
   Path, Local, J: string;
   E: TRemoteEntries;
   I: Integer;
+  W: Boolean;
 begin
   Path := CleanVPath(R.Params.Values['path']);
   if Path = '' then
@@ -362,12 +497,17 @@ begin
     E := ListLocalDir(Local)
   else
     raise EHttp.CreateCode(404, 'folder not found or no longer shared');
-  J := '{"path":' + JsonStr(Path) + ',"items":[';
+  W := FOwner.Shares.FolderWritable(Path);
+  J := '{"path":' + JsonStr(Path) + ',"writable":' + JsonBool(W) + ',"items":[';
   for I := 0 to High(E) do
   begin
     if I > 0 then J := J + ',';
     J := J + '{"name":' + JsonStr(E[I].Name) + ',"dir":' + JsonBool(E[I].IsDir) +
-      ',"size":' + IntToStr(E[I].Size) + ',"mtime":' + IntToStr(UnixTimeOf(E[I].Modified)) + '}';
+      ',"size":' + IntToStr(E[I].Size) + ',"mtime":' + IntToStr(UnixTimeOf(E[I].Modified));
+    // "w": may be changed (at the top: per share)
+    if (Path = '') and E[I].Writable then J := J + ',"w":true'
+    else if (Path <> '') and W then J := J + ',"w":true';
+    J := J + '}';
   end;
   HttpSend(200, 'application/json; charset=utf-8', J + ']}');
 end;
@@ -513,16 +653,16 @@ begin
       Left := Len;
       while Left > 0 do
       begin
-        if Terminated then raise ENetError.Create('ยกเลิกแล้ว');
+        if Terminated then raise ENetError.Create(L('Cancelled', 'ยกเลิกแล้ว'));
         if Left > BUF_SIZE then N := BUF_SIZE else N := Left;
         N := FS.Read(Buf[0], N);
-        if N <= 0 then raise ENetError.Create('อ่านไฟล์ไม่ได้');
+        if N <= 0 then raise ENetError.Create(L('Cannot read the file', 'อ่านไฟล์ไม่ได้'));
         SockSendAll(FSock, Buf[0], N);
         Dec(Left, N);
         Inc(FDone, N);
         if not Silent then Report;
       end;
-      if not Silent then SetState(tsDone, 'ส่งสำเร็จ');
+      if not Silent then SetState(tsDone, L('Sent', 'ส่งสำเร็จ'));
     except
       on E: Exception do
       begin
@@ -546,7 +686,7 @@ begin
   Synchronize(@DoAsk);   // may show a question on screen; the request waits
   if not FAccepted then
   begin
-    Log(Format('ปฏิเสธไฟล์จาก %s (%s)', [FPeerName, FPeerIP]));
+    Log(Format(L('Declined files from %s (%s)', 'ปฏิเสธไฟล์จาก %s (%s)'), [FPeerName, FPeerIP]));
     raise EHttp.CreateCode(403, 'rejected');
   end;
   S := FOwner.NewSession(FPeerName, FPeerIP, FFileCount, FTotal);
@@ -604,10 +744,10 @@ begin
       Left := R.ContentLength;
       while Left > 0 do
       begin
-        if Terminated then raise ENetError.Create('ยกเลิกแล้ว');
+        if Terminated then raise ENetError.Create(L('Cancelled', 'ยกเลิกแล้ว'));
         if Left > BUF_SIZE then N := BUF_SIZE else N := Left;
         N := fprecv(FSock, @Buf[0], N, 0);
-        if N <= 0 then raise ENetError.Create('การเชื่อมต่อขาด');
+        if N <= 0 then raise ENetError.Create(L('Connection lost', 'การเชื่อมต่อขาด'));
         FS.WriteBuffer(Buf[0], N);
         Dec(Left, N);
         Inc(FDone, N);
@@ -623,7 +763,7 @@ begin
     finally
       FOwner.Unlock;
     end;
-    SetState(tsDone, 'รับสำเร็จ');
+    SetState(tsDone, L('Received', 'รับสำเร็จ'));
   except
     on E: Exception do
     begin
@@ -641,7 +781,7 @@ begin
   S := FOwner.FindSession(R.Params.Values['token']);
   if S = nil then raise EHttp.CreateCode(404, 'unknown or expired token');
   S.Ended := True;
-  Log(Format('รับ %d ไฟล์จาก %s สำเร็จ', [S.Received, S.PeerName]));
+  Log(Format(L('Received %d file(s) from %s', 'รับ %d ไฟล์จาก %s สำเร็จ'), [S.Received, S.PeerName]));
   // tell the UI that this batch is complete (closes its card)
   FKind := tkReceive;
   FPeerName := S.PeerName;

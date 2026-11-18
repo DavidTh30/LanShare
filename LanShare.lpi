@@ -21,7 +21,8 @@
     <VersionInfo>
       <UseVersionInfo Value="True"/>
       <MajorVersionNr Value="1"/>
-      <StringTable FileDescription="LAN Share - share files and folders on the LAN" InternalName="LanShare" OriginalFilename="LanShare.exe" ProductName="LAN Share" ProductVersion="1.0.0" LegalCopyright="Copyright (c) 2026 LAN Share contributors. MIT License."/>
+      <MinorVersionNr Value="1"/>
+      <StringTable FileDescription="LAN Share - share files and folders on the LAN" InternalName="LanShare" OriginalFilename="LanShare.exe" ProductName="LAN Share" ProductVersion="1.1.0" LegalCopyright="Copyright (c) 2026 LAN Share contributors. MIT License."/>
     </VersionInfo>
     <BuildModes>
       <Item Name="Default" Default="True"/>
@@ -69,6 +70,41 @@
         <Filename Value="settingsdlg.pas"/>
         <IsPartOfProject Value="True"/>
         <UnitName Value="SettingsDlg"/>
+      </Unit>
+      <Unit>
+        <Filename Value="i18n.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="I18n"/>
+      </Unit>
+      <Unit>
+        <Filename Value="machineid.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="MachineID"/>
+      </Unit>
+      <Unit>
+        <Filename Value="identdlg.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="IdentDlg"/>
+      </Unit>
+      <Unit>
+        <Filename Value="themedmenu.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="ThemedMenu"/>
+      </Unit>
+      <Unit>
+        <Filename Value="fileops.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="FileOps"/>
+      </Unit>
+      <Unit>
+        <Filename Value="dragout.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="DragOut"/>
+      </Unit>
+      <Unit>
+        <Filename Value="themedlg.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="ThemeDlg"/>
       </Unit>
     </Units>
   </ProjectOptions>

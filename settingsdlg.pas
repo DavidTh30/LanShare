@@ -9,7 +9,7 @@ interface
 
 uses
   Classes, SysUtils, Types, Controls, Forms, StdCtrls, Graphics, LCLType,
-  BGRABitmap, BGRABitmapTypes, UITheme, UIWidgets, LanNet;
+  BGRABitmap, BGRABitmapTypes, UITheme, UIWidgets, LanNet, ThemeDlg, I18n;
 
 type
   { grid of device icons + row of colours + preview }
@@ -50,23 +50,32 @@ type
     FEdit: TEdit;
     FPicker: TIconPicker;
     FThemes: TThemePicker;
+    FLangBtn: array[TLang] of TFlatButton;
+    FSendHost: TBGRAControl;   // TToggleRow (declared in the implementation)
+    FLang: TLang;
     FHostName: string;
+    procedure LangClick(Sender: TObject);
     procedure EditChange(Sender: TObject);
     procedure AnonClick(Sender: TObject);
     procedure HostClick(Sender: TObject);
     procedure OkClick(Sender: TObject);
     procedure CancelClick(Sender: TObject);
+  protected
+    procedure CreateWnd; override;
   public
     constructor CreateDlg(AOwner: TComponent; const AName, AIcon, AHostName: string;
-      ATheme: TThemeKind);
+      ATheme: TThemeKind; ALang: TLang; ASendHost: Boolean);
     function NameValue: string;
     function IconValue: string;
     function ThemeValue: TThemeKind;
+    property LangValue: TLang read FLang;
+    function SendHostValue: Boolean;
   end;
 
 { shows the dialog; returns True and the new values when saved }
 function EditIdentity(AOwner: TComponent; var AName, AIcon: string;
-  var ATheme: TThemeKind; const AHostName: string): Boolean;
+  var ATheme: TThemeKind; var ALang: TLang; var ASendHost: Boolean;
+  const AHostName: string): Boolean;
 
 implementation
 
@@ -114,16 +123,16 @@ begin
       B.FillRoundRectAntialias(R.Left, R.Top, R.Right, R.Bottom, Sc(10), Sc(10), clHover);
     DrawDeviceAvatar(B, MakeDeviceIcon(I, SelColor), '', R.Left + (R.Width - S) / 2, R.Top + ScI(8), S, True, False);
     TextIn(B, Rect(R.Left + ScI(2), R.Top + ScI(56), R.Right - ScI(2), R.Bottom - ScI(4)),
-      DEVICE_KIND_LABELS[I], IfThen(I = SelKind, clText, clTextDim), taCenter);
+      DeviceKindLabel(I), IfThen(I = SelKind, clText, clTextDim), taCenter);
   end;
 
   // colours
   Y := 2 * ScI(84) + ScI(10);
   SetFont(B, 8.5, True);
-  B.TextOut(ScI(8), Y, 'สี', clTextDim);
+  B.TextOut(ScI(8), Y, L('Colour', 'สี'), clTextDim);
   for I := 0 to DEVICE_COLOR_COUNT - 1 do
   begin
-    X := ScI(40) + I * ScI(36);
+    X := Max(ScI(40), ScI(8) + B.TextSize(L('Colour', 'สี')).cx + ScI(14)) + I * ScI(36);
     FColorRects[I] := Rect(X, Y - ScI(4), X + ScI(30), Y + ScI(26));
     if I = SelColor then
       B.EllipseAntialias(X + ScI(15), Y + ScI(11), Sc(14), Sc(14), BGRAWhite, Sc(2), BGRAPixelTransparent)
@@ -145,7 +154,7 @@ begin
     TextIn(B, Rect(R.Left + ScI(62), R.Top + ScI(10), R.Right - ScI(10), R.Top + ScI(34)), '192.168.x.x', clText);
   SetFont(B, 8.5);
   TextIn(B, Rect(R.Left + ScI(62), R.Top + ScI(33), R.Right - ScI(10), R.Bottom - ScI(8)),
-    'ตัวอย่าง: เครื่องอื่นจะเห็นแบบนี้', clTextDim);
+    L('Preview: how other computers see you', 'ตัวอย่าง: เครื่องอื่นจะเห็นแบบนี้'), clTextDim);
 end;
 
 procedure TIconPicker.MouseMove(Shift: TShiftState; X, Y: Integer);
@@ -255,9 +264,9 @@ begin
       B.RoundRectAntialias(P.Left - ScI(2), P.Top - ScI(2), P.Right + ScI(2), P.Bottom + ScI(2), Sc(9), Sc(9), Sel, Sc(2));
     SetFont(B, 8.5, T = Selected);
     if T = Selected then
-      TextIn(B, Rect(R.Left, P.Bottom + ScI(4), R.Right, R.Bottom), THEME_LABELS[T], CText, taCenter)
+      TextIn(B, Rect(R.Left, P.Bottom + ScI(4), R.Right, R.Bottom), ThemeLabel(T), CText, taCenter)
     else
-      TextIn(B, Rect(R.Left, P.Bottom + ScI(4), R.Right, R.Bottom), THEME_LABELS[T], CDim, taCenter);
+      TextIn(B, Rect(R.Left, P.Bottom + ScI(4), R.Right, R.Bottom), ThemeLabel(T), CDim, taCenter);
   end;
 end;
 
@@ -303,12 +312,77 @@ type
     procedure Render(B: TBGRABitmap); override;
   public
     CapText: string;
+    VCenter: Boolean;   // text in the middle (a row with buttons) instead of at the bottom
   end;
+
+type
+  { switch + text, like the "accept automatically" switch in the sidebar }
+  TToggleRow = class(TBGRAControl)
+  private
+    FHot: Boolean;
+  protected
+    procedure Render(B: TBGRABitmap); override;
+    procedure MouseEnter; override;
+    procedure MouseLeave; override;
+    procedure MouseDown(Button: TMouseButton; Shift: TShiftState; X, Y: Integer); override;
+  public
+    Checked: Boolean;
+    Line1, Line2: string;
+  end;
+
+procedure TToggleRow.Render(B: TBGRABitmap);
+var
+  Y: Integer;
+begin
+  if FHot then
+    B.FillRoundRectAntialias(0, 0, B.Width, B.Height, Sc(8), Sc(8), clHover);
+  Y := B.Height div 2;
+  if Checked then
+  begin
+    FillGradientRoundRect(B, ScI(8), Y - ScI(9), ScI(44), Y + ScI(9), Sc(9), clAccent, clAccent2);
+    B.FillEllipseAntialias(ScI(35), Y, Sc(7), Sc(7), BGRAWhite);
+  end
+  else
+  begin
+    B.FillRoundRectAntialias(ScI(8), Y - ScI(9), ScI(44), Y + ScI(9), Sc(9), Sc(9), Mix(clCard, clTextDim, 0.45));
+    B.FillEllipseAntialias(ScI(17), Y, Sc(7), Sc(7), clPanel);
+  end;
+  SetFont(B, 9.5, True);
+  TextIn(B, Rect(ScI(56), ScI(4), B.Width - ScI(8), B.Height div 2 + ScI(2)), Line1, clText);
+  SetFont(B, 8.5);
+  TextIn(B, Rect(ScI(56), B.Height div 2, B.Width - ScI(8), B.Height - ScI(4)), Line2, clTextDim);
+end;
+
+procedure TToggleRow.MouseEnter;
+begin
+  inherited MouseEnter;
+  FHot := True;
+  Cursor := crHandPoint;
+  Invalidate;
+end;
+
+procedure TToggleRow.MouseLeave;
+begin
+  inherited MouseLeave;
+  FHot := False;
+  Invalidate;
+end;
+
+procedure TToggleRow.MouseDown(Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
+begin
+  inherited MouseDown(Button, Shift, X, Y);
+  if Button <> mbLeft then Exit;
+  Checked := not Checked;
+  Invalidate;
+end;
 
 procedure TCaptionBar.Render(B: TBGRABitmap);
 begin
   SetFont(B, 9, True);
-  B.TextOut(0, B.Height - ScI(22), CapText, clTextDim);
+  if VCenter then
+    TextIn(B, Rect(0, 0, B.Width, B.Height), CapText, clTextDim)
+  else
+    B.TextOut(0, B.Height - ScI(22), CapText, clTextDim);
 end;
 
 type
@@ -339,17 +413,20 @@ begin
   SetFont(B, 9);
   TextIn(B, Rect(0, ScI(34), B.Width, ScI(54)), Sub, clTextDim);
   SetFont(B, 9, True);
-  B.TextOut(0, B.Height - ScI(22), 'ชื่อที่เครื่องอื่นเห็น', clTextDim);
+  B.TextOut(0, B.Height - ScI(22), L('Name other computers see', 'ชื่อที่เครื่องอื่นเห็น'), clTextDim);
 end;
 
 constructor TSettingsDialog.CreateDlg(AOwner: TComponent; const AName, AIcon, AHostName: string;
-  ATheme: TThemeKind);
+  ATheme: TThemeKind; ALang: TLang; ASendHost: Boolean);
 var
   Head: TLabelPanel;
   Row, Bottom: TBGRAControl;
-  Gap, ThemeCap: TCaptionBar;
+  Gap, ThemeCap, LangRow: TCaptionBar;
+  Tg: TToggleRow;
+  NeedH, MaxH: Integer;
   B: TFlatButton;
   K, C: Integer;
+  X: TLang;
 
   function Btn(AParent: TWinControl; const ACap: string; AStyle: TButtonStyle; AAlign: TAlign;
     AClick: TNotifyEvent): TFlatButton;
@@ -367,11 +444,11 @@ var
 begin
   inherited CreateNew(AOwner);
   FHostName := AHostName;
-  Caption := 'ตั้งค่าเครื่องนี้';
+  Caption := L('Settings', 'ตั้งค่าเครื่องนี้');
   BorderStyle := bsDialog;
   Position := poOwnerFormCenter;
   ClientWidth := ScI(460);
-  ClientHeight := ScI(770);
+  NeedH := ScI(856);
   Color := BGRAToColor(clPanel);
 
   FPanel := TBGRAControl.Create(Self);
@@ -386,8 +463,8 @@ begin
   Head.Align := alTop;
   Head.Height := ScI(86);
   Head.BackColor := clPanel;
-  Head.Title := 'ตั้งค่าเครื่องนี้';
-  Head.Sub := 'เว้นว่างไว้ = ไม่แสดงชื่อ (ค่าเริ่มต้น) เครื่องอื่นเห็นเพียงไอคอนและ IP';
+  Head.Title := L('Settings', 'ตั้งค่าเครื่องนี้');
+  Head.Sub := L('Leave empty to show no name (the default)', 'เว้นว่างไว้ = ไม่แสดงชื่อ (ค่าเริ่มต้น) เครื่องอื่นเห็นเพียงไอคอนและ IP');
 
   FEdit := TEdit.Create(Self);
   FEdit.Parent := FPanel;
@@ -399,7 +476,7 @@ begin
   FEdit.Font.Color := BGRAToColor(clText);
   FEdit.BorderSpacing.Top := ScI(4);
   FEdit.Text := AName;
-  FEdit.TextHint := 'ไม่แสดงชื่อ';
+  FEdit.TextHint := L('No name', 'ไม่แสดงชื่อ');
   FEdit.OnChange := @EditChange;
 
   Row := TBGRAControl.Create(Self);
@@ -408,11 +485,26 @@ begin
   Row.Top := ScI(300);
   Row.Height := ScI(44);
   Row.BackColor := clPanel;
-  Btn(Row, 'ไม่แสดงชื่อ', bsNormal, alLeft, @AnonClick).BorderSpacing.Left := 0;
-  B := Btn(Row, 'ใช้ชื่อคอมพิวเตอร์', bsGhost, alLeft, @HostClick);
+  Btn(Row, L('No name', 'ไม่แสดงชื่อ'), bsNormal, alLeft, @AnonClick).BorderSpacing.Left := 0;
+  B := Btn(Row, L('Use computer name', 'ใช้ชื่อคอมพิวเตอร์'), bsGhost, alLeft, @HostClick);
   B.Left := 500;
-  B.Hint := 'จะแสดงชื่อ "' + FHostName + '" ให้ทุกเครื่องในวง LAN เห็น';
+  B.Hint := L('Shows the name "', 'จะแสดงชื่อ "') + FHostName + L('" to every computer on the LAN', '" ให้ทุกเครื่องในวง LAN เห็น');
   B.ShowHint := True;
+
+  // send the computer and user name (shown to others on right-click only)
+  Tg := TToggleRow.Create(Self);
+  Tg.Parent := FPanel;
+  Tg.Align := alTop;
+  Tg.Top := ScI(350);
+  Tg.Height := ScI(48);
+  Tg.BorderSpacing.Top := ScI(4);
+  Tg.BackColor := clPanel;
+  Tg.Checked := ASendHost;
+  Tg.Line1 := L('Send computer name and user name', 'ส่งชื่อคอมพิวเตอร์และชื่อผู้ใช้');
+  Tg.Line2 := L('Others see them on right-click', 'เครื่องอื่นเห็นเมื่อคลิกขวา');
+  Tg.Hint := L('Off: others see only the machine code', 'ปิด: เครื่องอื่นเห็นเพียงรหัสเครื่อง');
+  Tg.ShowHint := True;
+  FSendHost := Tg;
 
   Gap := TCaptionBar.Create(Self);
   Gap.Parent := FPanel;
@@ -420,16 +512,16 @@ begin
   Gap.Top := ScI(400);
   Gap.Height := ScI(34);
   Gap.BackColor := clPanel;
-  Gap.CapText := 'ไอคอน';
+  Gap.CapText := L('Icon', 'ไอคอน');
 
   Bottom := TButtonRow.Create(Self);
   Bottom.Parent := FPanel;
   Bottom.Align := alBottom;
   Bottom.Height := ScI(46);
   Bottom.BackColor := clPanel;
-  B := Btn(Bottom, 'บันทึก', bsAccent, alRight, @OkClick);
+  B := Btn(Bottom, L('Save', 'บันทึก'), bsAccent, alRight, @OkClick);
   B.Left := 900;
-  Btn(Bottom, 'ยกเลิก', bsNormal, alRight, @CancelClick).Left := 800;
+  Btn(Bottom, L('Cancel', 'ยกเลิก'), bsNormal, alRight, @CancelClick).Left := 800;
 
   // theme (above the buttons; alBottom controls stack upwards)
   FThemes := TThemePicker.Create(Self);
@@ -443,8 +535,31 @@ begin
   ThemeCap.Align := alBottom;
   ThemeCap.Height := ScI(30);
   ThemeCap.BackColor := clPanel;
-  ThemeCap.CapText := 'ธีม';
+  ThemeCap.CapText := L('Theme', 'ธีม');
+  // language (above the theme)
+  FLang := ALang;
+  // caption on the left, the buttons on the right of the same row
+  LangRow := TCaptionBar.Create(Self);
+  LangRow.Parent := FPanel;
+  LangRow.Align := alBottom;
+  LangRow.Height := ScI(40);
+  LangRow.BorderSpacing.Bottom := ScI(8);
+  LangRow.BackColor := clPanel;
+  LangRow.CapText := 'Language / ภาษา';
+  LangRow.VCenter := True;
+  LangRow.ChildSizing.TopBottomSpacing := ScI(3);
+  for X := High(TLang) downto Low(TLang) do
+  begin
+    FLangBtn[X] := Btn(LangRow, LANG_NAMES[X], bsNormal, alRight, @LangClick);
+    FLangBtn[X].Tag := Ord(X);
+    FLangBtn[X].Left := 1000 + Ord(X) * 200;
+    FLangBtn[X].BorderSpacing.Left := ScI(8);
+    FLangBtn[X].Width := Max(FLangBtn[X].Width, ScI(96));
+  end;
+  LangClick(FLangBtn[FLang]);
+
   // LCL orders alBottom controls by Top: larger Top = lower on screen
+  LangRow.Top := 9900;
   ThemeCap.Top := 10000;
   FThemes.Top := 10100;
   Bottom.Top := 10200;
@@ -458,12 +573,42 @@ begin
   FPicker.PreviewName := AName;
 
   ActiveControl := FEdit;
+
+  // fit the screen: on a small screen the content scrolls instead of being cut
+  MaxH := Screen.WorkAreaHeight - ScI(60);
+  if NeedH <= MaxH then
+    ClientHeight := NeedH
+  else
+  begin
+    FPanel.Align := alTop;
+    FPanel.Height := NeedH;
+    ClientHeight := MaxH;
+    AutoScroll := True;
+  end;
+end;
+
+procedure TSettingsDialog.CreateWnd;
+begin
+  inherited CreateWnd;
+  ApplyWindowTheme(Self);
 end;
 
 procedure TSettingsDialog.EditChange(Sender: TObject);
 begin
   FPicker.PreviewName := NameValue;
   FPicker.Invalidate;
+end;
+
+procedure TSettingsDialog.LangClick(Sender: TObject);
+var
+  X: TLang;
+begin
+  FLang := TLang(TFlatButton(Sender).Tag);
+  for X := Low(TLang) to High(TLang) do
+  begin
+    if X = FLang then FLangBtn[X].Style := bsAccent else FLangBtn[X].Style := bsNormal;
+    FLangBtn[X].Invalidate;
+  end;
 end;
 
 procedure TSettingsDialog.AnonClick(Sender: TObject);
@@ -491,6 +636,11 @@ begin
   Result := Trim(StringReplace(FEdit.Text, '|', '-', [rfReplaceAll]));
 end;
 
+function TSettingsDialog.SendHostValue: Boolean;
+begin
+  Result := TToggleRow(FSendHost).Checked;
+end;
+
 function TSettingsDialog.ThemeValue: TThemeKind;
 begin
   Result := FThemes.Selected;
@@ -502,11 +652,12 @@ begin
 end;
 
 function EditIdentity(AOwner: TComponent; var AName, AIcon: string;
-  var ATheme: TThemeKind; const AHostName: string): Boolean;
+  var ATheme: TThemeKind; var ALang: TLang; var ASendHost: Boolean;
+  const AHostName: string): Boolean;
 var
   D: TSettingsDialog;
 begin
-  D := TSettingsDialog.CreateDlg(AOwner, AName, AIcon, AHostName, ATheme);
+  D := TSettingsDialog.CreateDlg(AOwner, AName, AIcon, AHostName, ATheme, ALang, ASendHost);
   try
     Result := D.ShowModal = mrOK;
     if Result then
@@ -514,6 +665,8 @@ begin
       AName := D.NameValue;
       AIcon := D.IconValue;
       ATheme := D.ThemeValue;
+      ALang := D.LangValue;
+      ASendHost := D.SendHostValue;
     end;
   finally
     D.Free;

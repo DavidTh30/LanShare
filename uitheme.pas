@@ -8,19 +8,21 @@ unit UITheme;
 interface
 
 uses
-  Classes, SysUtils, Types, Graphics, BGRABitmap, BGRABitmapTypes, BGRAGraphics, BGRAGradientScanner;
+  Classes, SysUtils, Types, Graphics, I18n, BGRABitmap, BGRABitmapTypes, BGRAGraphics, BGRAGradientScanner;
 
 type
   TIconKind = (ikNone, ikBack, ikUp, ikRefresh, ikDownload, ikUpload, ikPlus,
     ikShare, ikTrash, ikFolderOpen, ikNetwork, ikClose, ikCheck, ikChevron,
-    ikComputer, ikFolderPlus, ikFilePlus, ikGear, ikEye);
+    ikComputer, ikFolderPlus, ikFilePlus, ikGear, ikEye,
+    ikViewDetails, ikViewList, ikViewIcons, ikEdit);
 
 const
   { device icons a user can pick; sent to others as '<kind>.<color>' }
   DEVICE_KINDS: array[0..7] of string =
     ('desktop', 'laptop', 'phone', 'tablet', 'server', 'tv', 'store', 'megaphone');
-  DEVICE_KIND_LABELS: array[0..7] of string =
-    ('คอมพิวเตอร์', 'โน้ตบุ๊ก', 'มือถือ', 'แท็บเล็ต', 'เซิร์ฟเวอร์', 'จอทีวี', 'ร้านค้า', 'ประกาศ');
+  DEVICE_KIND_LABELS: array[TLang, 0..7] of string = (
+    ('Computer', 'Laptop', 'Phone', 'Tablet', 'Server', 'TV screen', 'Shop', 'Notice'),
+    ('คอมพิวเตอร์', 'โน้ตบุ๊ก', 'มือถือ', 'แท็บเล็ต', 'เซิร์ฟเวอร์', 'จอทีวี', 'ร้านค้า', 'ประกาศ'));
   DEVICE_COLOR_COUNT = 8;
 
 type
@@ -28,7 +30,9 @@ type
 
 const
   THEME_NAMES: array[TThemeKind] of string = ('dark', 'light', 'ocean', 'rose', 'forest', 'sunset', 'coffee', 'neon', 'lavender', 'mono', 'auto');
-  THEME_LABELS: array[TThemeKind] of string = ('มืด', 'สว่าง', 'มหาสมุทร', 'ชมพู', 'ป่าไม้', 'ยามเย็น', 'กาแฟ', 'นีออน', 'ลาเวนเดอร์', 'ขาวดำ', 'ตามระบบ');
+  THEME_LABELS: array[TLang, TThemeKind] of string = (
+    ('Dark', 'Light', 'Ocean', 'Pink', 'Forest', 'Sunset', 'Coffee', 'Neon', 'Lavender', 'Mono', 'System'),
+    ('มืด', 'สว่าง', 'มหาสมุทร', 'ชมพู', 'ป่าไม้', 'ยามเย็น', 'กาแฟ', 'นีออน', 'ลาเวนเดอร์', 'ขาวดำ', 'ตามระบบ'));
 
 var
   UIScale: Single = 1.0;
@@ -56,11 +60,16 @@ var
 
 { switch every colour above to a theme (thAuto follows the OS light/dark setting) }
 procedure SetTheme(T: TThemeKind);
+{ labels in the current language }
+function ThemeLabel(T: TThemeKind): string;
+function DeviceKindLabel(I: Integer): string;
 function ThemeFromName(const S: string): TThemeKind;
 { the palette that thAuto resolves to right now }
 function ResolveTheme(T: TThemeKind): TThemeKind;
 { current colours as CSS custom properties, served to browsers as /theme.css }
 function ThemeCss: string;
+{ True when the current palette is a light one }
+function IsLightTheme: Boolean;
 { CSS of a named theme without touching the current colours (thread-safe);
   '' for unknown names and 'auto' }
 function ThemeCssByName(const Name: string): string;
@@ -206,6 +215,19 @@ begin
   end;
 end;
 
+function ThemeLabel(T: TThemeKind): string;
+begin
+  Result := THEME_LABELS[Lang, T];
+end;
+
+function DeviceKindLabel(I: Integer): string;
+begin
+  if (I >= 0) and (I <= 7) then
+    Result := DEVICE_KIND_LABELS[Lang, I]
+  else
+    Result := '';
+end;
+
 function CssColor(const C: TBGRAPixel): string;
 begin
   Result := Format('#%.2x%.2x%.2x', [C.red, C.green, C.blue]);
@@ -247,6 +269,11 @@ begin
   Result := ThemeCssOf(CurrentTheme);
 end;
 
+function IsLightTheme: Boolean;
+begin
+  Result := PALETTES[ResolveTheme(CurrentTheme)].Light;
+end;
+
 function ThemeCssByName(const Name: string): string;
 var
   T: TThemeKind;
@@ -268,7 +295,7 @@ begin
     if T = thAuto then Continue;
     P := PALETTES[T];
     if Result <> '[' then Result := Result + ',';
-    Result := Result + '{"name":"' + THEME_NAMES[T] + '","label":"' + THEME_LABELS[T] + '"' +
+    Result := Result + '{"name":"' + THEME_NAMES[T] + '","label":"' + ThemeLabel(T) + '"' +
       ',"light":' + BoolToStr(P.Light, 'true', 'false') +
       ',"bg":"' + CssColor(Px(P.Bg)) + '","side":"' + CssColor(Px(P.Side)) + '"' +
       ',"text":"' + CssColor(Px(P.Text)) + '","dim":"' + CssColor(Px(P.Dim)) + '"' +
@@ -483,6 +510,34 @@ begin
           Line([P(0.6, 0.12), P(0.8, 0.32), P(0.8, 0.5)]);
         Line([P(0.75, 0.6), P(0.75, 0.94)]);
         Line([P(0.58, 0.77), P(0.92, 0.77)]);
+      end;
+    ikViewDetails:
+      // rows with a small icon and two columns
+      for I := 0 to 2 do
+      begin
+        Dot(0.2, 0.27 + I * 0.23, 0.055);
+        Line([P(0.34, 0.27 + I * 0.23), P(0.6, 0.27 + I * 0.23)]);
+        Line([P(0.7, 0.27 + I * 0.23), P(0.84, 0.27 + I * 0.23)]);
+      end;
+    ikViewList:
+      // two columns of short rows
+      for I := 0 to 2 do
+      begin
+        Dot(0.17, 0.27 + I * 0.23, 0.05);
+        Line([P(0.27, 0.27 + I * 0.23), P(0.43, 0.27 + I * 0.23)]);
+        Dot(0.57, 0.27 + I * 0.23, 0.05);
+        Line([P(0.67, 0.27 + I * 0.23), P(0.83, 0.27 + I * 0.23)]);
+      end;
+    ikViewIcons:
+      // 2 x 2 tiles
+      for I := 0 to 3 do
+        B.RoundRectAntialias(X + (0.16 + (I mod 2) * 0.38) * S, Y + (0.16 + (I div 2) * 0.38) * S,
+          X + (0.46 + (I mod 2) * 0.38) * S, Y + (0.46 + (I div 2) * 0.38) * S, 0.06 * S, 0.06 * S, C, W);
+    ikEdit:
+      begin
+        // pencil
+        Line([P(0.2, 0.8), P(0.25, 0.62), P(0.66, 0.21), P(0.79, 0.34), P(0.38, 0.75), P(0.2, 0.8)]);
+        Line([P(0.57, 0.3), P(0.7, 0.43)]);
       end;
     ikComputer:
       begin

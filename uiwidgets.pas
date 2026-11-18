@@ -14,7 +14,7 @@ interface
 
 uses
   Classes, SysUtils, Types, Controls, Graphics, LCLType, Forms,
-  BGRABitmap, BGRABitmapTypes, UITheme, LanNet;
+  BGRABitmap, BGRABitmapTypes, UITheme, LanNet, I18n;
 
 type
   { which theme colour a control is filled with; kept as a role so that a
@@ -47,6 +47,7 @@ type
     Status: string;
     StatusOK: Boolean;
     RightReserve: Integer;   // width used by child buttons on the right
+    MyIcon: string;          // this machine's device icon, shown as a badge on the logo
   end;
 
   { ---------- button ---------- }
@@ -89,13 +90,25 @@ type
     CanBrowse: Boolean;  // speaks the binary protocol ('bin')
     Online: Boolean;
     LastSeen: QWord;
+    { identity (empty for old versions and for devices that never announced) }
+    Host: string;        // computer name
+    User: string;        // login name
+    Machine: string;     // machine code: the same after renames and restarts
+    Version: string;
+    Names: string;       // every display name seen, newest last, one per line
+    FirstSeenAt: TDateTime;
+    LastSeenAt: TDateTime;
   end;
+
+  { Index = -1: right click on the empty part of the list }
+  TSideContextEvent = procedure(Sender: TObject; Index: Integer; const ScreenPt: TPoint) of object;
+  TContextPtEvent = procedure(Sender: TObject; const ScreenPt: TPoint) of object;
 
   TSidebar = class(TBGRAControl)
   private
     FHot: Integer;
     FScroll: Integer;
-    FRectDir, FRectOpen, FRectToggle: TRect;
+    FRectDir, FRectOpen, FRectToggle, FRectRefresh: TRect;
     FHotZone: Integer;
     function RowH: Integer;
     function ListTop: Integer;
@@ -116,6 +129,9 @@ type
     OnPickDir: TNotifyEvent;
     OnOpenDir: TNotifyEvent;
     OnToggleAuto: TNotifyEvent;
+    OnContext: TSideContextEvent;   // right click on a row (or empty space: -1)
+    OnRefresh: TNotifyEvent;        // refresh button next to the heading
+    Refreshing: Boolean;            // a refresh is running: button drawn active
     BottomReserve: Integer;   // space used by child buttons at the bottom
     constructor Create(AOwner: TComponent); override;
     function IndexOfID(const AID: string): Integer;
@@ -147,23 +163,36 @@ type
     Info: string;        // 3rd column text (location or date)
     LocalPath: string;
     Shared: Boolean;     // draw share badge
+    Writable: Boolean;   // others may change it (Read + Write share)
   end;
   TViewItems = array of TViewItem;
   TIntArray = array of Integer;
 
+  { Details: one row per item with columns; List: compact rows in several
+    columns; Icons: large tiles }
+  TViewMode = (vmDetails, vmList, vmIcons);
+
   TFileView = class(TBGRAControl)
   private
+    FViewMode: TViewMode;
     FItems: TViewItems;
     FSel: array of Boolean;
     FFocus, FAnchor, FHot: Integer;
     FScroll: Integer;
     FDragThumb: Boolean;
     FDragY0, FDragScroll0: Integer;
-    function RowH: Integer;
+    FPressed: Boolean;           // left button down on a row: may become a drag-out
+    FPressPt: TPoint;
+    FDeferSelect: Integer;       // row to select alone on mouse-up (when no drag happened)
+    function RowH: Integer;       // height of one row of cells
+    function CellW: Integer;
+    function Cols: Integer;
     function HeadH: Integer;
     function ContentH: Integer;
     function MaxScroll: Integer;
-    function RowAt(Y: Integer): Integer;
+    function ItemRect(I: Integer): TRect;
+    function ItemAt(X, Y: Integer): Integer;
+    procedure SetViewMode(V: TViewMode);
     function ThumbRect: TRect;
     procedure SetScroll(V: Integer);
     procedure EnsureVisible(I: Integer);
@@ -186,6 +215,12 @@ type
     OnOpen: TNotifyEvent;       // double-click / Enter on FocusIndex
     OnSelChange: TNotifyEvent;
     OnBack: TNotifyEvent;       // Backspace
+    OnDragOut: TNotifyEvent;    // selected rows dragged out of the list
+    OnCopy: TNotifyEvent;       // Ctrl+C on selected rows
+    OnRefresh: TNotifyEvent;    // F5
+    OnContext: TContextPtEvent; // right click / menu key (selection already updated)
+    OnRename: TNotifyEvent;     // F2
+    OnDelete: TNotifyEvent;     // Delete key
     constructor Create(AOwner: TComponent); override;
     procedure SetItems(const A: TViewItems);
     procedure Clear;
@@ -195,6 +230,7 @@ type
     function SelectedIdx: TIntArray;
     procedure SelectAll;
     property FocusIndex: Integer read FFocus;
+    property ViewMode: TViewMode read FViewMode write SetViewMode;
   end;
 
   { ---------- transfers ---------- }
@@ -333,7 +369,7 @@ end;
 
 procedure THeaderBar.Render(B: TBGRABitmap);
 var
-  S, X, W: Integer;
+  S, X, W, Badge, BX, BY: Integer;
   R: TRect;
 begin
   B.GradientFill(0, 0, B.Width, B.Height, clHead1, clHead2, gtLinear,
@@ -344,9 +380,21 @@ begin
   S := ScI(40);
   X := ScI(16);
   DrawAppLogo(B, X, (B.Height - S) / 2, S);
+  // this machine's own icon as a badge on the logo's corner, so several
+  // LAN Share windows are easy to tell apart (the program icon stays)
+  if MyIcon <> '' then
+  begin
+    Badge := Round(S * 0.62);
+    BX := X + S - Badge + ScI(6);
+    BY := Round((B.Height + S) / 2) - Badge + ScI(6);
+    // ring in the header colour separates the badge from the logo
+    B.FillRoundRectAntialias(BX - Sc(2.5), BY - Sc(2.5), BX + Badge + Sc(2.5), BY + Badge + Sc(2.5),
+      Badge * 0.36, Badge * 0.36, Mix(clHead1, clHead2, 0.15));
+    DrawDeviceAvatar(B, MyIcon, '', BX, BY, Badge, True, False);
+  end;
   // title
   SetFont(B, 14, True);
-  B.TextOut(X + S + ScI(12), ScI(9), 'LAN Share', clText);
+  B.TextOut(X + S + ScI(16), ScI(9), 'LAN Share', clText);
   // status pill (right) gets at most 45% of the width; subtitle uses the rest
   R := Rect(B.Width - RightReserve, 0, B.Width - RightReserve, 0);
   if Status <> '' then
@@ -357,8 +405,8 @@ begin
       B.Width - RightReserve - ScI(16), (B.Height + ScI(30)) div 2);
   end;
   SetFont(B, 9);
-  B.TextOut(X + S + ScI(12), ScI(36),
-    Ellipsize(B, SubTitle, R.Left - (X + S + ScI(12)) - ScI(16)), clTextDim);
+  B.TextOut(X + S + ScI(16), ScI(36),
+    Ellipsize(B, SubTitle, R.Left - (X + S + ScI(16)) - ScI(16)), clTextDim);
   if Status <> '' then
   begin
     SetFont(B, 9);
@@ -575,9 +623,19 @@ begin
   for I := 0 to High(Items) do
     if (not Items[I].IsMe) and Items[I].Online then Inc(Peers);
   SetFont(B, 8.5, True);
-  B.TextOut(ScI(18), ScI(18), 'เครื่องในเครือข่าย', clTextDim);
+  B.TextOut(ScI(18), ScI(18), L('Computers', 'เครื่องในเครือข่าย'), clTextDim);
+  // refresh button
+  FRectRefresh := Rect(B.Width - ScI(44), ScI(10), B.Width - ScI(14), ScI(40));
+  if FHotZone = 4 then
+    B.FillRoundRectAntialias(FRectRefresh.Left, FRectRefresh.Top, FRectRefresh.Right, FRectRefresh.Bottom,
+      Sc(7), Sc(7), clHover);
+  if Refreshing then
+    DrawIcon(B, ikRefresh, FRectRefresh.Left + ScI(6), FRectRefresh.Top + ScI(6), ScI(18), clAccent)
+  else
+    DrawIcon(B, ikRefresh, FRectRefresh.Left + ScI(6), FRectRefresh.Top + ScI(6), ScI(18), clTextDim);
+  SetFont(B, 8.5, True);
   if Peers > 0 then
-    TextIn(B, Rect(0, ScI(14), B.Width - ScI(18), ScI(34)), IntToStr(Peers) + ' ออนไลน์', clOk, taRightJustify);
+    TextIn(B, Rect(0, ScI(14), FRectRefresh.Left - ScI(4), ScI(34)), IntToStr(Peers) + L(' online', ' ออนไลน์'), clOk, taRightJustify);
 
   B.ClipRect := Rect(0, ListTop, B.Width, ListBottom);
   IconS := ScI(36);
@@ -609,7 +667,7 @@ begin
     end
     else if not Items[I].Online then
     begin
-      Sub := Items[I].IP + ' • ออฟไลน์';
+      Sub := Items[I].IP + L(' • offline', ' • ออฟไลน์');
       SubC := WithAlpha(clTextDim, 150);
     end
     else
@@ -635,8 +693,8 @@ begin
   begin
     SetFont(B, 8.5);
     R := Rect(ScI(20), ListTop + RowH + ScI(10), B.Width - ScI(20), ListTop + RowH + ScI(56));
-    TextIn(B, Rect(R.Left, R.Top, R.Right, R.Top + ScI(20)), 'กำลังค้นหาเครื่องอื่น...', clTextDim, taCenter);
-    TextIn(B, Rect(R.Left, R.Top + ScI(20), R.Right, R.Top + ScI(40)), 'เปิด LAN Share บนเครื่องอื่นในวงเดียวกัน', WithAlpha(clTextDim, 160), taCenter);
+    TextIn(B, Rect(R.Left, R.Top, R.Right, R.Top + ScI(20)), L('Looking for other computers...', 'กำลังค้นหาเครื่องอื่น...'), clTextDim, taCenter);
+    TextIn(B, Rect(R.Left, R.Top + ScI(20), R.Right, R.Top + ScI(40)), L('Open LAN Share on another computer on this network', 'เปิด LAN Share บนเครื่องอื่นในวงเดียวกัน'), WithAlpha(clTextDim, 160), taCenter);
   end;
 
   // receive settings card
@@ -645,7 +703,7 @@ begin
   B.FillRoundRectAntialias(R.Left, R.Top, R.Right, R.Bottom, Sc(12), Sc(12), clPanel);
   B.RoundRectAntialias(R.Left + 0.5, R.Top + 0.5, R.Right - 0.5, R.Bottom - 0.5, Sc(12), Sc(12), clBorder, 1);
   SetFont(B, 8.5, True);
-  B.TextOut(R.Left + ScI(12), R.Top + ScI(10), 'โฟลเดอร์รับไฟล์', clTextDim);
+  B.TextOut(R.Left + ScI(12), R.Top + ScI(10), L('Receive folder', 'โฟลเดอร์รับไฟล์'), clTextDim);
 
   FRectDir := Rect(R.Left + ScI(8), R.Top + ScI(32), R.Right - ScI(44), R.Top + ScI(64));
   FRectOpen := Rect(R.Right - ScI(40), R.Top + ScI(32), R.Right - ScI(8), R.Top + ScI(64));
@@ -682,7 +740,7 @@ begin
   end;
   SetFont(B, 9);
   TextIn(B, Rect(FRectToggle.Left + ScI(52), FRectToggle.Top, FRectToggle.Right, FRectToggle.Bottom),
-    'รับไฟล์อัตโนมัติ (ไม่ถาม)', clText);
+    L('Accept files automatically', 'รับไฟล์อัตโนมัติ (ไม่ถาม)'), clText);
 end;
 
 procedure TSidebar.MouseMove(Shift: TShiftState; X, Y: Integer);
@@ -694,6 +752,7 @@ begin
   if PtIn(FRectDir, X, Y) then Z := 1
   else if PtIn(FRectOpen, X, Y) then Z := 2
   else if PtIn(FRectToggle, X, Y) then Z := 3
+  else if PtIn(FRectRefresh, X, Y) then Z := 4
   else Z := 0;
   if (H <> FHot) or (Z <> FHotZone) then
   begin
@@ -717,7 +776,19 @@ var
   I: Integer;
 begin
   inherited MouseDown(Button, Shift, X, Y);
+  if Button = mbRight then
+  begin
+    // on a row, or on the empty part of the list
+    if (Y >= ListTop) and (Y < ListBottom) and Assigned(OnContext) then
+      OnContext(Self, ItemAt(Y), ClientToScreen(Point(X, Y)));
+    Exit;
+  end;
   if Button <> mbLeft then Exit;
+  if PtIn(FRectRefresh, X, Y) then
+  begin
+    if Assigned(OnRefresh) then OnRefresh(Self);
+    Exit;
+  end;
   if PtIn(FRectDir, X, Y) then
   begin
     if Assigned(OnPickDir) then OnPickDir(Self);
@@ -852,22 +923,46 @@ begin
   FFocus := -1;
   FAnchor := -1;
   FHot := -1;
-  Col3Title := 'แก้ไขล่าสุด';
+  FDeferSelect := -1;
+  Col3Title := L('Modified', 'แก้ไขล่าสุด');
 end;
 
 function TFileView.RowH: Integer;
 begin
-  Result := ScI(40);
+  case FViewMode of
+    vmList:  Result := ScI(34);
+    vmIcons: Result := ScI(124);
+  else
+    Result := ScI(40);
+  end;
+end;
+
+function TFileView.CellW: Integer;
+begin
+  case FViewMode of
+    vmList:  Result := ScI(250);
+    vmIcons: Result := ScI(118);
+  else
+    Result := Max(1, ClientWidth - ScI(22));
+  end;
+end;
+
+function TFileView.Cols: Integer;
+begin
+  if FViewMode = vmDetails then Result := 1
+  else Result := Max(1, (ClientWidth - ScI(24)) div CellW);
 end;
 
 function TFileView.HeadH: Integer;
 begin
-  Result := ScI(34);
+  // the column header exists only in Details
+  if FViewMode = vmDetails then Result := ScI(34) else Result := ScI(10);
 end;
 
 function TFileView.ContentH: Integer;
 begin
-  Result := Length(FItems) * RowH;
+  Result := ((Length(FItems) + Cols - 1) div Cols) * RowH;
+  if FViewMode <> vmDetails then Inc(Result, ScI(10));
 end;
 
 function TFileView.MaxScroll: Integer;
@@ -885,17 +980,53 @@ begin
   end;
 end;
 
+procedure TFileView.SetViewMode(V: TViewMode);
+begin
+  if V = FViewMode then Exit;
+  FViewMode := V;
+  FScroll := 0;
+  FHot := -1;
+  if FFocus >= 0 then EnsureVisible(FFocus);
+  Invalidate;
+end;
+
 procedure TFileView.Resize;
 begin
   inherited Resize;
   FScroll := EnsureRange(FScroll, 0, MaxScroll);
 end;
 
-function TFileView.RowAt(Y: Integer): Integer;
+{ the cell of item I in client coordinates (scrolled) }
+function TFileView.ItemRect(I: Integer): TRect;
+var
+  C, Row, X0, Y0: Integer;
+begin
+  C := I mod Cols;
+  Row := I div Cols;
+  X0 := ScI(8) + C * CellW;
+  Y0 := HeadH + Row * RowH - FScroll;
+  if FViewMode = vmDetails then
+    Result := Rect(ScI(8), Y0, ClientWidth - ScI(14), Y0 + RowH)
+  else
+    Result := Rect(X0, Y0, X0 + CellW, Y0 + RowH);
+end;
+
+function TFileView.ItemAt(X, Y: Integer): Integer;
+var
+  Row, C: Integer;
 begin
   Result := -1;
   if Y < HeadH then Exit;
-  Result := (Y - HeadH + FScroll) div RowH;
+  Row := (Y - HeadH + FScroll) div RowH;
+  if FViewMode = vmDetails then
+    Result := Row
+  else
+  begin
+    if X < ScI(8) then Exit;
+    C := (X - ScI(8)) div CellW;
+    if C >= Cols then Exit;
+    Result := Row * Cols + C;
+  end;
   if Result >= Length(FItems) then Result := -1;
 end;
 
@@ -916,7 +1047,7 @@ var
   RowTop: Integer;
 begin
   if I < 0 then Exit;
-  RowTop := I * RowH;
+  RowTop := (I div Cols) * RowH;
   if RowTop < FScroll then SetScroll(RowTop)
   else if RowTop + RowH > FScroll + ClientHeight - HeadH then
     SetScroll(RowTop + RowH - (ClientHeight - HeadH));
@@ -1035,14 +1166,17 @@ begin
   SizeX := InfoX - ScI(100);
   NameR := SizeX - ScI(12);
 
-  // column header
-  B.FillRect(0, 0, B.Width, HeadH, clBg, dmSet);
-  SetFont(B, 8.5, True);
-  TextIn(B, Rect(ScI(56), 0, NameR, HeadH), 'ชื่อ', clTextDim);
-  TextIn(B, Rect(SizeX, 0, InfoX - ScI(16), HeadH), 'ขนาด', clTextDim, taRightJustify);
-  if Showing3 then
-    TextIn(B, Rect(InfoX, 0, B.Width - RightPad, HeadH), Col3Title, clTextDim);
-  B.FillRect(ScI(12), HeadH - 1, B.Width - ScI(12), HeadH, clBorder, dmSet);
+  // column header (Details only)
+  if FViewMode = vmDetails then
+  begin
+    B.FillRect(0, 0, B.Width, HeadH, clBg, dmSet);
+    SetFont(B, 8.5, True);
+    TextIn(B, Rect(ScI(56), 0, NameR, HeadH), L('Name', 'ชื่อ'), clTextDim);
+    TextIn(B, Rect(SizeX, 0, InfoX - ScI(16), HeadH), L('Size', 'ขนาด'), clTextDim, taRightJustify);
+    if Showing3 then
+      TextIn(B, Rect(InfoX, 0, B.Width - RightPad, HeadH), Col3Title, clTextDim);
+    B.FillRect(ScI(12), HeadH - 1, B.Width - ScI(12), HeadH, clBorder, dmSet);
+  end;
 
   if IsLoading then
   begin
@@ -1051,7 +1185,7 @@ begin
       B.FillEllipseAntialias(B.Width / 2 - Sc(16) + I * Sc(16), B.Height / 2 - Sc(10), Sc(4), Sc(4),
         WithAlpha(clAccent, 120 + I * 60));
     SetFont(B, 10);
-    TextIn(B, Rect(0, B.Height div 2, B.Width, B.Height div 2 + ScI(30)), 'กำลังโหลด...', clTextDim, taCenter);
+    TextIn(B, Rect(0, B.Height div 2, B.Width, B.Height div 2 + ScI(30)), L('Loading...', 'กำลังโหลด...'), clTextDim, taCenter);
     Exit;
   end;
   if ErrorText <> '' then
@@ -1059,7 +1193,7 @@ begin
     B.FillEllipseAntialias(B.Width / 2, B.Height / 2 - Sc(30), Sc(24), Sc(24), WithAlpha(clErr, 50));
     DrawIcon(B, ikClose, B.Width / 2 - Sc(12), B.Height / 2 - Sc(42), Sc(24), clErr);
     SetFont(B, 11, True);
-    TextIn(B, Rect(0, B.Height div 2 + ScI(4), B.Width, B.Height div 2 + ScI(30)), 'เปิดไม่ได้', clText, taCenter);
+    TextIn(B, Rect(0, B.Height div 2 + ScI(4), B.Width, B.Height div 2 + ScI(30)), L('Cannot open', 'เปิดไม่ได้'), clText, taCenter);
     SetFont(B, 9);
     TextIn(B, Rect(ScI(20), B.Height div 2 + ScI(30), B.Width - ScI(20), B.Height div 2 + ScI(54)), ErrorText, clTextDim, taCenter);
     Exit;
@@ -1080,10 +1214,14 @@ begin
   IconS := ScI(26);
   for I := 0 to High(FItems) do
   begin
-    Y := HeadH + I * RowH - FScroll;
-    if Y + RowH < HeadH then Continue;
-    if Y > B.Height then Break;
-    R := Rect(ScI(8), Y + ScI(1), B.Width - ScI(14), Y + RowH - ScI(1));
+    R := ItemRect(I);
+    Y := R.Top;
+    if R.Bottom < HeadH then Continue;
+    if R.Top > B.Height then Break;
+    if FViewMode = vmDetails then
+      R := Rect(R.Left, R.Top + ScI(1), R.Right, R.Bottom - ScI(1))
+    else
+      R := Rect(R.Left + ScI(2), R.Top + ScI(2), R.Right - ScI(4), R.Bottom - ScI(2));
     if FSel[I] then
     begin
       B.FillRoundRectAntialias(R.Left, R.Top, R.Right, R.Bottom, Sc(8), Sc(8), clSel);
@@ -1092,6 +1230,39 @@ begin
     end
     else if I = FHot then
       B.FillRoundRectAntialias(R.Left, R.Top, R.Right, R.Bottom, Sc(8), Sc(8), clHover);
+
+    if FViewMode = vmList then
+    begin
+      A := ScI(22);
+      if FItems[I].IsDir then
+        DrawFolderIcon(B, R.Left + ScI(8), R.Top + (R.Height - A) / 2, A, FItems[I].Shared)
+      else
+        DrawFileIcon(B, FItems[I].Name, R.Left + ScI(8), R.Top + (R.Height - A) / 2, A);
+      SetFont(B, 9.5);
+      TextIn(B, Rect(R.Left + ScI(38), R.Top, R.Right - ScI(6), R.Bottom), FItems[I].Name, clText);
+      Continue;
+    end;
+    if FViewMode = vmIcons then
+    begin
+      A := ScI(56);
+      if FItems[I].IsDir then
+        DrawFolderIcon(B, (R.Left + R.Right - A) / 2, R.Top + ScI(8), A, FItems[I].Shared)
+      else
+        DrawFileIcon(B, FItems[I].Name, (R.Left + R.Right - A) / 2, R.Top + ScI(8), A);
+      if FItems[I].Writable and FItems[I].IsDir then
+      begin
+        // pencil badge: others may change this folder
+        B.FillEllipseAntialias((R.Left + R.Right + A) / 2 - Sc(4), R.Top + ScI(14), Sc(9), Sc(9), clAccent);
+        DrawIcon(B, ikEdit, (R.Left + R.Right + A) / 2 - Sc(11), R.Top + ScI(7), Sc(14), BGRAWhite);
+      end;
+      SetFont(B, 9);
+      TextIn(B, Rect(R.Left + ScI(6), R.Top + ScI(68), R.Right - ScI(6), R.Top + ScI(90)),
+        FItems[I].Name, clText, taCenter);
+      SetFont(B, 8);
+      if FItems[I].IsDir then S := L('Folder', 'โฟลเดอร์') else S := FormatBytes(FItems[I].Size);
+      TextIn(B, Rect(R.Left + ScI(6), R.Top + ScI(90), R.Right - ScI(6), R.Top + ScI(108)), S, clTextDim, taCenter);
+      Continue;
+    end;
 
     if FItems[I].IsDir then
       DrawFolderIcon(B, ScI(18), Y + (RowH - IconS) / 2, IconS, FItems[I].Shared)
@@ -1102,7 +1273,7 @@ begin
     TR := Rect(ScI(56), Y, NameR, Y + RowH);
     TextIn(B, TR, FItems[I].Name, clText);
     SetFont(B, 9);
-    if FItems[I].IsDir then S := 'โฟลเดอร์' else S := FormatBytes(FItems[I].Size);
+    if FItems[I].IsDir then S := L('Folder', 'โฟลเดอร์') else S := FormatBytes(FItems[I].Size);
     TextIn(B, Rect(SizeX, Y, InfoX - ScI(16), Y + RowH), S, clTextDim, taRightJustify);
     if Showing3 then
       TextIn(B, Rect(InfoX, Y, B.Width - RightPad, Y + RowH), FItems[I].Info, clTextDim);
@@ -1123,6 +1294,21 @@ var
   ViewH: Integer;
 begin
   inherited MouseMove(Shift, X, Y);
+  // moved far enough with the button down on a selected row: drag out
+  if FPressed and (ssLeft in Shift) and
+     ((Abs(X - FPressPt.X) > ScI(6)) or (Abs(Y - FPressPt.Y) > ScI(6))) then
+  begin
+    FPressed := False;
+    FDeferSelect := -1;
+    if Assigned(OnDragOut) and (SelCount > 0) then
+    begin
+      MouseCapture := False;
+      OnDragOut(Self);        // runs the whole drag; returns when it is dropped or cancelled
+      FHot := -1;
+      Invalidate;
+    end;
+    Exit;
+  end;
   if FDragThumb then
   begin
     R := ThumbRect;
@@ -1131,7 +1317,7 @@ begin
       SetScroll(FDragScroll0 + Round((Y - FDragY0) * MaxScroll / ViewH));
     Exit;
   end;
-  H := RowAt(Y);
+  H := ItemAt(X, Y);
   if H <> FHot then
   begin
     FHot := H;
@@ -1165,7 +1351,7 @@ begin
     Invalidate;
     Exit;
   end;
-  I := RowAt(Y);
+  I := ItemAt(X, Y);
   if I < 0 then
   begin
     if not (ssCtrl in Shift) then
@@ -1182,6 +1368,20 @@ begin
     SelectOnly(I);
     SelChanged;
     if Assigned(OnOpen) then OnOpen(Self);
+    Exit;
+  end;
+  if Button = mbLeft then
+  begin
+    FPressed := True;
+    FPressPt := Point(X, Y);
+  end;
+  if (Button = mbLeft) and FSel[I] and (Shift * [ssShift, ssCtrl] = []) then
+  begin
+    // like Explorer: keep the selection so all of it can be dragged;
+    // a plain click (no drag) selects only this row on mouse-up
+    FDeferSelect := I;
+    FFocus := I;
+    Invalidate;
     Exit;
   end;
   if (ssShift in Shift) and (FAnchor >= 0) then
@@ -1204,6 +1404,21 @@ end;
 procedure TFileView.MouseUp(Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
 begin
   inherited MouseUp(Button, Shift, X, Y);
+  if (Button = mbRight) and Assigned(OnContext) then
+  begin
+    OnContext(Self, ClientToScreen(Point(X, Y)));
+    Exit;
+  end;
+  FPressed := False;
+  if FDeferSelect >= 0 then
+  begin
+    if FDeferSelect <= High(FSel) then
+    begin
+      SelectOnly(FDeferSelect);
+      SelChanged;
+    end;
+    FDeferSelect := -1;
+  end;
   if FDragThumb then
   begin
     FDragThumb := False;
@@ -1213,21 +1428,27 @@ end;
 
 procedure TFileView.KeyDown(var Key: Word; Shift: TShiftState);
 var
-  N: Integer;
+  N, C, Page: Integer;
 begin
   inherited KeyDown(Key, Shift);
   N := Length(FItems);
+  C := Cols;
+  Page := Max(1, (ClientHeight - HeadH) div RowH) * C;
+  // Left/Right move between cells only where items sit side by side
+  if (Key in [VK_LEFT, VK_RIGHT]) and (FViewMode = vmDetails) then Exit;
   case Key of
-    VK_DOWN, VK_UP, VK_HOME, VK_END, VK_NEXT, VK_PRIOR:
+    VK_DOWN, VK_UP, VK_LEFT, VK_RIGHT, VK_HOME, VK_END, VK_NEXT, VK_PRIOR:
       if N > 0 then
       begin
         case Key of
-          VK_DOWN:  FFocus := Min(N - 1, FFocus + 1);
-          VK_UP:    FFocus := Max(0, FFocus - 1);
+          VK_DOWN:  if FFocus < 0 then FFocus := 0 else if FFocus + C < N then FFocus := FFocus + C;
+          VK_UP:    if FFocus < 0 then FFocus := 0 else if FFocus - C >= 0 then FFocus := FFocus - C;
+          VK_RIGHT: FFocus := Min(N - 1, FFocus + 1);
+          VK_LEFT:  FFocus := Max(0, FFocus - 1);
           VK_HOME:  FFocus := 0;
           VK_END:   FFocus := N - 1;
-          VK_NEXT:  FFocus := Min(N - 1, FFocus + (ClientHeight - HeadH) div RowH);
-          VK_PRIOR: FFocus := Max(0, FFocus - (ClientHeight - HeadH) div RowH);
+          VK_NEXT:  FFocus := Min(N - 1, FFocus + Page);
+          VK_PRIOR: FFocus := Max(0, FFocus - Page);
         end;
         SelectOnly(FFocus);
         EnsureVisible(FFocus);
@@ -1250,12 +1471,46 @@ begin
         SelectAll;
         Key := 0;
       end;
+    VK_C:
+      if (ssCtrl in Shift) and (SelCount > 0) and Assigned(OnCopy) then
+      begin
+        OnCopy(Self);
+        Key := 0;
+      end;
+    VK_F2:
+      if (SelCount = 1) and Assigned(OnRename) then
+      begin
+        OnRename(Self);
+        Key := 0;
+      end;
+    VK_DELETE:
+      if (SelCount > 0) and Assigned(OnDelete) then
+      begin
+        OnDelete(Self);
+        Key := 0;
+      end;
+    VK_F5:
+      if Assigned(OnRefresh) then
+      begin
+        OnRefresh(Self);
+        Key := 0;
+      end;
+    VK_APPS, VK_F10:
+      // menu key or Shift+F10: the menu at the focused row
+      if ((Key = VK_APPS) or (ssShift in Shift)) and Assigned(OnContext) then
+      begin
+        if FFocus >= 0 then
+          OnContext(Self, ClientToScreen(Point(ItemRect(FFocus).Left + ScI(40), ItemRect(FFocus).Bottom)))
+        else
+          OnContext(Self, ClientToScreen(Point(ScI(60), HeadH + ScI(10))));
+        Key := 0;
+      end;
   end;
 end;
 
 function TFileView.DoMouseWheel(Shift: TShiftState; WheelDelta: Integer; MousePos: TPoint): Boolean;
 begin
-  SetScroll(FScroll - (WheelDelta * RowH * 3) div 120);
+  SetScroll(FScroll - (WheelDelta * Min(RowH, ScI(40)) * 3) div 120);
   Result := True;
 end;
 
@@ -1365,16 +1620,16 @@ begin
     if (State = tsDone) and (GroupFiles > 0) and (DoneFiles < GroupFiles) and not Ended then
       State := tsRunning;
     if (State = tsDone) and Ended and (GroupFiles > 0) and (DoneFiles < GroupFiles) then
-      Msg := Format('ได้รับ %d จาก %d ไฟล์', [DoneFiles, GroupFiles]);
+      Msg := Format(L('Got %d of %d files', 'ได้รับ %d จาก %d ไฟล์'), [DoneFiles, GroupFiles]);
 
     if T.GroupEnded then
       // keep the title from the file reports
     else if T.Group = '' then
       Title := T.Title
     else if GroupFiles > 0 then
-      Title := Format('%d / %d ไฟล์', [DoneFiles, GroupFiles])
+      Title := Format(L('%d / %d files', '%d / %d ไฟล์'), [DoneFiles, GroupFiles])
     else
-      Title := Format('%d ไฟล์', [Length(Members)]);
+      Title := Format(L('%d file(s)', '%d ไฟล์'), [Length(Members)]);
     if T.PeerName <> '' then Peer := T.PeerName else if T.PeerIP <> '' then Peer := T.PeerIP;
     if not T.GroupEnded then
     begin
@@ -1414,7 +1669,7 @@ begin
         begin
           // a batch whose client stopped sending/asking: it will not finish
           State := tsFailed;
-          Msg := 'อีกฝั่งหยุดกลางคัน';
+          Msg := L('The other side stopped', 'อีกฝั่งหยุดกลางคัน');
           AnyChanged := True;
         end;
       end;
@@ -1448,32 +1703,32 @@ var
 begin
   B.FillRect(0, 0, B.Width, 1, clBorder, dmSet);
   SetFont(B, 9.5, True);
-  B.TextOut(ScI(18), ScI(9), 'การถ่ายโอน', clText);
+  B.TextOut(ScI(18), ScI(9), L('Transfers', 'การถ่ายโอน'), clText);
   if ActiveCount > 0 then
   begin
     SetFont(B, 8.5);
     SetFont(B, 9.5, True);
-    I := ScI(18) + TextW(B, 'การถ่ายโอน') + ScI(12);
+    I := ScI(18) + TextW(B, L('Transfers', 'การถ่ายโอน')) + ScI(12);
     SetFont(B, 8.5);
-    B.TextOut(I, ScI(11), Format('กำลังทำงาน %d รายการ', [ActiveCount]), clAccent);
+    B.TextOut(I, ScI(11), Format(L('%d running', 'กำลังทำงาน %d รายการ'), [ActiveCount]), clAccent);
   end;
   FClearRect := Rect(0, 0, 0, 0);
   if Length(FCards) > ActiveCount then
   begin
     SetFont(B, 8.5);
-    FClearRect := Rect(B.Width - ScI(18) - TextW(B, 'ล้างรายการที่เสร็จแล้ว') - ScI(16), ScI(5),
+    FClearRect := Rect(B.Width - ScI(18) - TextW(B, L('Clear finished', 'ล้างรายการที่เสร็จแล้ว')) - ScI(16), ScI(5),
       B.Width - ScI(14), ScI(29));
     if FHotClear then
       B.FillRoundRectAntialias(FClearRect.Left, FClearRect.Top, FClearRect.Right, FClearRect.Bottom, Sc(6), Sc(6), clHover);
     TextIn(B, Rect(FClearRect.Left + ScI(8), FClearRect.Top, FClearRect.Right, FClearRect.Bottom),
-      'ล้างรายการที่เสร็จแล้ว', clTextDim);
+      L('Clear finished', 'ล้างรายการที่เสร็จแล้ว'), clTextDim);
   end;
 
   SetLength(FCancelRects, Length(FCards));
   if Length(FCards) = 0 then
   begin
     SetFont(B, 9);
-    TextIn(B, Rect(0, HeadH, B.Width, B.Height), 'ยังไม่มีการถ่ายโอน — เลือกไฟล์แล้วกดดาวน์โหลด หรือส่งไฟล์ไปยังเครื่องอื่น',
+    TextIn(B, Rect(0, HeadH, B.Width, B.Height), L('No transfers yet — select files and click Download, or send files to another computer', 'ยังไม่มีการถ่ายโอน — เลือกไฟล์แล้วกดดาวน์โหลด หรือส่งไฟล์ไปยังเครื่องอื่น'),
       WithAlpha(clTextDim, 170), taCenter);
     Exit;
   end;
@@ -1490,11 +1745,11 @@ begin
     with FCards[I] do
     begin
       case Kind of
-        tkSend:     begin Dir := 'ส่งไปยัง';     Ico := ikUpload; end;
-        tkReceive:  begin Dir := 'รับจาก';       Ico := ikDownload; end;
-        tkDownload: begin Dir := 'ดาวน์โหลดจาก'; Ico := ikDownload; end;
+        tkSend:     begin Dir := L('To', 'ส่งไปยัง');     Ico := ikUpload; end;
+        tkReceive:  begin Dir := L('From', 'รับจาก');       Ico := ikDownload; end;
+        tkDownload: begin Dir := L('Downloading from', 'ดาวน์โหลดจาก'); Ico := ikDownload; end;
       else
-        begin Dir := 'ส่งให้'; Ico := ikUpload; end;
+        begin Dir := L('Sent to', 'ส่งให้'); Ico := ikUpload; end;
       end;
       case State of
         tsDone: C := clOk;
@@ -1514,10 +1769,10 @@ begin
       case State of
         tsConnecting, tsWaiting: Right_ := Msg;
         tsRunning:  Right_ := Format('%d%%  •  %s/s', [Round(Pct * 100), FormatBytes(Round(Speed))]);
-        tsDone:     Right_ := Format('%s  •  เสร็จแล้ว', [FormatBytes(Total)]);
-        tsRejected: Right_ := 'ถูกปฏิเสธ';
+        tsDone:     Right_ := Format(L('%s  •  done', '%s  •  เสร็จแล้ว'), [FormatBytes(Total)]);
+        tsRejected: Right_ := L('Declined', 'ถูกปฏิเสธ');
       else
-        Right_ := 'ล้มเหลว';
+        Right_ := L('Failed', 'ล้มเหลว');
       end;
 
       BarL := R.Left + ScI(48);

@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="th">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -52,6 +52,11 @@
   .meta { color:var(--dim); font-size:12.5px; white-space:nowrap; }
   .dl { flex:none; width:34px; height:34px; border-radius:9px; display:grid; place-items:center; color:var(--dim); text-decoration:none; }
   .dl:hover { background:var(--card); color:var(--text); }
+  .more { font-size:20px; line-height:1; border:0; background:none; cursor:pointer; }
+  .wtag { color:var(--accent); font-size:12px; margin-left:6px; }
+  .acts { display:grid; gap:8px; }
+  .acts .btn { width:100%; text-align:left; }
+  .btn.danger { background:#d9485f; }
   .empty { text-align:center; color:var(--dim); padding:60px 20px; }
   .bar { position:fixed; left:0; right:0; bottom:0; padding:12px 14px calc(12px + env(safe-area-inset-bottom));
     background:var(--panel); border-top:1px solid var(--line); display:flex; gap:10px; align-items:center; }
@@ -117,8 +122,8 @@ document.write('<link rel="stylesheet" id="themecss" href="' + themeHref(themeCh
         <path d="M12 12L5 5M12 12l7-7M12 12l-7 7M12 12l7 7"/><circle cx="12" cy="12" r="3.4" fill="#fff"/>
         <circle cx="5" cy="5" r="2.2" fill="#fff"/><circle cx="19" cy="5" r="2.2" fill="#fff"/>
         <circle cx="5" cy="19" r="2.2" fill="#fff"/><circle cx="19" cy="19" r="2.2" fill="#fff"/></svg></div>
-      <div><h1><span id="pcname">LAN Share</span><span class="tag">แชร์สาธารณะ</span></h1><p id="sub">กำลังเชื่อมต่อ...</p></div>
-      <button class="iconbtn" id="themebtn" title="ธีม" aria-label="เลือกธีม"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+      <div><h1><span id="pcname">LAN Share</span><span class="tag" data-th="แชร์สาธารณะ">Public</span></h1><p id="sub" data-th="กำลังเชื่อมต่อ...">Connecting...</p></div>
+      <button class="iconbtn" id="themebtn" title="Theme" aria-label="Choose a theme" data-th-title="ธีม" data-th-aria="เลือกธีม"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"
         stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 0 18c1.1 0 1.6-.8 1.6-1.6
         0-.5-.2-.9-.5-1.2-.3-.3-.5-.7-.5-1.2 0-.9.7-1.6 1.6-1.6H16a5 5 0 0 0 5-5C21 6.5 17 3 12 3z"/><circle cx="7.5" cy="11" r="1.2"
         fill="currentColor"/><circle cx="10.5" cy="7" r="1.2" fill="currentColor"/><circle cx="15" cy="7.5" r="1.2" fill="currentColor"/></svg></button>
@@ -127,36 +132,56 @@ document.write('<link rel="stylesheet" id="themecss" href="' + themeHref(themeCh
   </header>
   <main><div id="banner"></div><div id="list"></div></main>
   <div class="bar">
-    <div class="status"><div id="status">แตะโฟลเดอร์เพื่อเปิด แตะไฟล์เพื่อดู/ดาวน์โหลด</div><div class="prog" id="prog"><i id="progi"></i></div></div>
-    <button class="btn" id="sendbtn">ส่งไฟล์</button>
+    <div class="status"><div id="status" data-th="แตะโฟลเดอร์เพื่อเปิด แตะไฟล์เพื่อดู/ดาวน์โหลด">Tap a folder to open it, a file to view or download it</div><div class="prog" id="prog"><i id="progi"></i></div></div>
+    <button class="btn ghost" id="mkdirbtn" style="display:none" data-th="+ โฟลเดอร์">+ Folder</button>
+    <button class="btn" id="sendbtn" data-th="ส่งไฟล์">Send files</button>
     <input type="file" id="picker" multiple hidden>
   </div>
 </div>
 
 <div class="sheet" id="sheet">
   <div class="sheetbox">
-    <div class="sheethead"><span>ธีมของหน้านี้</span><button class="iconbtn" id="sheetclose" aria-label="ปิด">✕</button></div>
+    <div class="sheethead"><span data-th="ธีมของหน้านี้">Theme of this page</span><button class="iconbtn" id="sheetclose" aria-label="Close" data-th-aria="ปิด">✕</button></div>
     <div class="tgrid" id="tgrid"></div>
+  </div>
+</div>
+
+<div class="sheet" id="actsheet">
+  <div class="sheetbox">
+    <div class="sheethead"><span id="acttitle"></span><button class="iconbtn" id="actclose" aria-label="Close" data-th-aria="ปิด">✕</button></div>
+    <div class="acts">
+      <button class="btn ghost" id="actrename" data-th="เปลี่ยนชื่อ">Rename</button>
+      <button class="btn danger" id="actdelete" data-th="ลบ (ไปที่ถังขยะของเครื่องนั้น)">Delete (to that computer's Recycle Bin)</button>
+    </div>
   </div>
 </div>
 
 <div id="viewer">
   <div class="vbar">
-    <a class="btn ghost" id="vback" href="/">‹ กลับ</a>
+    <a class="btn ghost" id="vback" href="/" data-th="‹ กลับ">‹ Back</a>
     <div class="t" id="vtitle"></div>
-    <a class="btn ghost" id="vkiosk" title="เปิดแบบจอโฆษณา: เต็มจอ ไม่มีแถบ อัปเดตเองทุก 30 วินาที">จอโฆษณา</a>
-    <button class="btn ghost" id="vfull" title="เต็มจอ">⛶</button>
-    <a class="btn" id="vdl">ดาวน์โหลด</a>
+    <a class="btn ghost" id="vkiosk" title="Advert screen: full screen, no bars, refreshes every 30 seconds" data-th-title="เปิดแบบจอโฆษณา: เต็มจอ ไม่มีแถบ อัปเดตเองทุก 30 วินาที" data-th="จอโฆษณา">Advert screen</a>
+    <button class="btn ghost" id="vfull" title="Full screen" data-th-title="เต็มจอ">⛶</button>
+    <a class="btn" id="vdl" data-th="ดาวน์โหลด">Download</a>
   </div>
   <div class="vbody" id="vbody"></div>
 </div>
 
 <script>
 "use strict";
+/* language: the PC serves the page with <html lang="en"> or "th" */
+var TH = document.documentElement.lang === "th";
+function T(en, th) { return TH ? th : en; }
+if (TH) {
+  document.querySelectorAll("[data-th]").forEach(function (e) { e.textContent = e.dataset.th; });
+  document.querySelectorAll("[data-th-title]").forEach(function (e) { e.title = e.dataset.thTitle; });
+  document.querySelectorAll("[data-th-aria]").forEach(function (e) { e.setAttribute("aria-label", e.dataset.thAria); });
+}
 var ua = navigator.userAgent;
 var me = localStorage.getItem("lanshare.name") ||
-  (/Android/.test(ua) ? "มือถือ Android" : /iPhone|iPad/.test(ua) ? "iPhone/iPad" : "เบราว์เซอร์");
+  (/Android/.test(ua) ? T("Android phone", "มือถือ Android") : /iPhone|iPad/.test(ua) ? "iPhone/iPad" : T("Browser", "เบราว์เซอร์"));
 var cur = "";
+var curW = false;   // the folder shown accepts changes (Read + Write share)
 var $ = function (id) { return document.getElementById(id); };
 var PREVIEW = /\.(md|markdown|png|jpe?g|gif|webp|svg|pdf|mp4|webm|m4v|mov|mp3|m4a|wav|ogg|txt)$/i;
 
@@ -193,7 +218,7 @@ function media(path, alt) {
     return "<figure><video src=\"" + u + "\" controls autoplay muted loop playsinline preload=\"metadata\"></video>" + cap + "</figure>";
   if (/^(mp3|m4a|wav|ogg)$/.test(ext)) return "<audio src=\"" + u + "\" controls></audio>";
   if (ext === "pdf")
-    return "<div class=\"pdf\"><iframe src=\"" + u + "#view=FitH\" loading=\"lazy\"></iframe><a class=\"btn ghost\" href=\"" + u + "\" target=\"_blank\">เปิด PDF" + (alt ? ": " + alt : "") + "</a></div>";
+    return "<div class=\"pdf\"><iframe src=\"" + u + "#view=FitH\" loading=\"lazy\"></iframe><a class=\"btn ghost\" href=\"" + u + "\" target=\"_blank\">" + T("Open PDF", "เปิด PDF") + (alt ? ": " + alt : "") + "</a></div>";
   return "<img src=\"" + u + "\" alt=\"" + alt + "\" loading=\"lazy\">";
 }
 function inline(t, base) {
@@ -293,7 +318,7 @@ function crumbs() {
     var b = document.createElement("button"); b.textContent = label;
     b.onclick = function () { go(path); }; nav.appendChild(b);
   };
-  add("ทั้งหมด", "");
+  add(T("All", "ทั้งหมด"), "");
   parts.forEach(function (p, i) {
     var s = document.createElement("span"); s.textContent = "›"; nav.appendChild(s);
     add(p, parts.slice(0, i + 1).join("/"));
@@ -311,12 +336,13 @@ function showBanner(path, items) {
 }
 function go(path) {
   cur = path; crumbs();
-  var list = $("list"); list.innerHTML = '<div class="empty">กำลังโหลด...</div>'; $("banner").innerHTML = "";
+  var list = $("list"); list.innerHTML = '<div class="empty">' + T("Loading...", "กำลังโหลด...") + '</div>'; $("banner").innerHTML = "";
   fetch(api("list", { path: path, client: me })).then(function (r) { return r.json(); }).then(function (d) {
     if (d.error) { list.innerHTML = ""; var e = document.createElement("div"); e.className = "empty"; e.textContent = d.error; list.appendChild(e); return; }
+    curW = !!d.writable; updateBar();
     d.items.sort(function (a, b) { return (b.dir - a.dir) || a.name.localeCompare(b.name); });
     showBanner(path, d.items);
-    list.innerHTML = d.items.length ? "" : '<div class="empty">' + (path ? "โฟลเดอร์นี้ว่างเปล่า" : "เครื่องนี้ยังไม่ได้แชร์อะไร") + "</div>";
+    list.innerHTML = d.items.length ? "" : '<div class="empty">' + (path ? T("This folder is empty", "โฟลเดอร์นี้ว่างเปล่า") : T("Nothing is shared yet", "เครื่องนี้ยังไม่ได้แชร์อะไร")) + "</div>";
     d.items.forEach(function (it) {
       var full = path ? path + "/" + it.name : it.name;
       var a = document.createElement("a"); a.className = "row";
@@ -325,17 +351,27 @@ function go(path) {
       else { a.href = fileUrl(full, true); a.setAttribute("download", it.name); }
       a.innerHTML = icon(it.dir, it.name) + '<div class="name"></div><div class="meta"></div>';
       a.querySelector(".name").textContent = it.name;
-      a.querySelector(".meta").textContent = it.dir ? "โฟลเดอร์" : fmt(it.size);
+      a.querySelector(".meta").textContent = it.dir ? T("Folder", "โฟลเดอร์") : fmt(it.size);
+      if (!path && it.w) {
+        var wt = document.createElement("span"); wt.className = "wtag"; wt.textContent = "✎";
+        wt.title = T("Read & write", "อ่านและเขียน"); a.querySelector(".name").appendChild(wt);
+      }
+      if (curW) {
+        var mb = document.createElement("button"); mb.className = "dl more"; mb.textContent = "⋯";
+        mb.title = T("Rename or delete", "เปลี่ยนชื่อหรือลบ");
+        mb.onclick = function (ev) { ev.preventDefault(); ev.stopPropagation(); openActs(it.name); };
+        a.appendChild(mb);
+      }
       if (!it.dir) {
         var dl = document.createElement("a"); dl.className = "dl"; dl.href = fileUrl(full, true);
-        dl.setAttribute("download", it.name); dl.title = "ดาวน์โหลด"; dl.innerHTML = DLICON;
+        dl.setAttribute("download", it.name); dl.title = T("Download", "ดาวน์โหลด"); dl.innerHTML = DLICON;
         dl.onclick = function (ev) { ev.stopPropagation(); };
         a.appendChild(dl);
       }
       list.appendChild(a);
     });
     history.replaceState(null, "", "/#" + encodeURIComponent(path));
-  }).catch(function () { list.innerHTML = '<div class="empty">เชื่อมต่อไม่ได้</div>'; });
+  }).catch(function () { list.innerHTML = '<div class="empty">' + T("Cannot connect", "เชื่อมต่อไม่ได้") + '</div>'; });
 }
 
 /* ---------- viewer ---------- */
@@ -357,7 +393,7 @@ function startViewer() {
         if (t === last) return;               // unchanged: keep videos playing
         last = t;
         body.innerHTML = ext === "txt" ? "<pre class=\"md\">" + esc(t) + "</pre>" : '<article class="md">' + md(t, dirOf(path)) + "</article>";
-      }).catch(function () { if (!last) body.innerHTML = '<div class="empty">เปิดไม่ได้ (ไฟล์ถูกลบหรือเลิกแชร์แล้ว)</div>'; });
+      }).catch(function () { if (!last) body.innerHTML = '<div class="empty">' + T("Cannot open (the file was deleted or unshared)", "เปิดไม่ได้ (ไฟล์ถูกลบหรือเลิกแชร์แล้ว)") + '</div>'; });
     } else if (!last) {
       last = "x";
       body.innerHTML = media(path, "");
@@ -377,10 +413,11 @@ function status(t, pct) {
   $("prog").style.display = pct === undefined ? "none" : "block";
   if (pct !== undefined) $("progi").style.width = Math.round(pct * 100) + "%";
 }
-function put(url, file, onp) {
+function put(url, file, onp, write) {
   return new Promise(function (ok, bad) {
     var x = new XMLHttpRequest(); x.open("PUT", url);
     x.setRequestHeader("X-LanShare-Name", encodeURIComponent(me));
+    if (write) x.setRequestHeader("X-LanShare-Write", "1");
     x.upload.onprogress = function (e) { onp(e.loaded); };
     x.onload = function () { x.status === 200 ? ok() : bad(new Error(x.responseText)); };
     x.onerror = function () { bad(new Error("network")); };
@@ -391,22 +428,79 @@ $("sendbtn").onclick = function () { $("picker").click(); };
 $("picker").onchange = async function () {
   var files = Array.prototype.slice.call(this.files); this.value = "";
   if (!files.length) return;
+  if (curW) return uploadHere(files);
   var total = files.reduce(function (s, f) { return s + f.size; }, 0), done = 0;
   try {
-    status("รอให้คอมพิวเตอร์กดยอมรับ...");
+    status(T("Waiting for the computer to accept...", "รอให้คอมพิวเตอร์กดยอมรับ..."));
     var r = await fetch(api("push/begin", { files: files.length, bytes: total, client: me }), { method: "POST" });
     var d = await r.json();
-    if (!r.ok) { status(d.error === "rejected" ? "คอมพิวเตอร์ปฏิเสธการรับไฟล์" : "ส่งไม่ได้: " + d.error); return; }
+    if (!r.ok) { status(d.error === "rejected" ? T("The computer declined the files", "คอมพิวเตอร์ปฏิเสธการรับไฟล์") : T("Cannot send: ", "ส่งไม่ได้: ") + d.error); return; }
     for (var i = 0; i < files.length; i++) {
       var f = files[i], base = done;
       await put(api("push/file", { token: d.token, path: f.name }), f, function (n) {
-        status("กำลังส่ง " + f.name + " (" + (i + 1) + "/" + files.length + ")", (base + n) / Math.max(1, total));
+        status(T("Sending ", "กำลังส่ง ") + f.name + " (" + (i + 1) + "/" + files.length + ")", (base + n) / Math.max(1, total));
       });
       done += f.size;
     }
     await fetch(api("push/end", { token: d.token }), { method: "POST" });
-    status("ส่งสำเร็จ " + files.length + " ไฟล์ (" + fmt(total) + ")", 1);
-  } catch (e) { status("ส่งไม่สำเร็จ: " + e.message); }
+    status(T("Sent " + files.length + " file(s) (", "ส่งสำเร็จ " + files.length + " ไฟล์ (") + fmt(total) + ")", 1);
+  } catch (e) { status(T("Send failed: ", "ส่งไม่สำเร็จ: ") + e.message); }
+};
+
+/* ---------- Read + Write folders ---------- */
+function updateBar() {
+  $("sendbtn").textContent = curW ? T("Upload here", "อัปโหลดที่นี่") : T("Send files", "ส่งไฟล์");
+  $("mkdirbtn").style.display = curW ? "" : "none";
+}
+function joinPath(a, b) { return a ? a + "/" + b : b; }
+function writeOp(kind, params) {
+  return fetch(api(kind, params), { method: "POST",
+    headers: { "X-LanShare-Write": "1", "X-LanShare-Name": encodeURIComponent(me) } })
+    .then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.error || r.status); return d; }); });
+}
+async function uploadHere(files) {
+  var path = cur, total = files.reduce(function (s, f) { return s + f.size; }, 0), done = 0;
+  try {
+    for (var i = 0; i < files.length; i++) {
+      var f = files[i], base = done;
+      await put(api("upload", { path: path, name: f.name }), f, function (n) {
+        status(T("Uploading ", "กำลังอัปโหลด ") + f.name + " (" + (i + 1) + "/" + files.length + ")", (base + n) / Math.max(1, total));
+      }, true);
+      done += f.size;
+    }
+    status(T("Uploaded " + files.length + " file(s)", "อัปโหลด " + files.length + " ไฟล์แล้ว"), 1);
+  } catch (e) { status(T("Upload failed: ", "อัปโหลดไม่สำเร็จ: ") + e.message); }
+  if (cur === path) go(path);
+}
+$("mkdirbtn").onclick = function () {
+  var n = prompt(T("Name of the new folder", "ชื่อโฟลเดอร์ใหม่"), T("New folder", "โฟลเดอร์ใหม่"));
+  if (!n || !n.trim()) return;
+  var path = cur;
+  writeOp("mkdir", { path: joinPath(path, n.trim()) })
+    .then(function () { status(T("Folder created", "สร้างโฟลเดอร์แล้ว")); go(path); })
+    .catch(function (e) { status(T("Not done: ", "ทำไม่สำเร็จ: ") + e.message); });
+};
+var actName = "";
+function openActs(name) { actName = name; $("acttitle").textContent = name; $("actsheet").classList.add("open"); }
+function closeActs() { $("actsheet").classList.remove("open"); }
+$("actclose").onclick = closeActs;
+$("actsheet").onclick = function (e) { if (e.target === this) closeActs(); };
+$("actrename").onclick = function () {
+  var path = cur, old = actName, n = prompt(T("New name", "ชื่อใหม่"), old);
+  closeActs();
+  if (!n || !n.trim() || n.trim() === old) return;
+  writeOp("rename", { path: joinPath(path, old), to: n.trim() })
+    .then(function () { status(T("Renamed", "เปลี่ยนชื่อแล้ว")); go(path); })
+    .catch(function (e) { status(T("Not done: ", "ทำไม่สำเร็จ: ") + e.message); });
+};
+$("actdelete").onclick = function () {
+  var path = cur, name = actName;
+  closeActs();
+  if (!confirm(T("Delete \"" + name + "\"? It goes to the Recycle Bin of that computer.",
+                 "ลบ \"" + name + "\"? จะไปอยู่ในถังขยะของเครื่องนั้น"))) return;
+  writeOp("delete", { path: joinPath(path, name) })
+    .then(function () { status(T("Deleted", "ลบแล้ว")); go(path); })
+    .catch(function (e) { status(T("Not done: ", "ทำไม่สำเร็จ: ") + e.message); });
 };
 
 function showInfo() {
@@ -414,10 +508,10 @@ function showInfo() {
     var nm = i.name || location.hostname;   // no name set: show the address
     $("pcname").textContent = nm; document.title = nm + " — LAN Share";
     var sub = $("sub"); sub.innerHTML = "";
-    sub.appendChild(document.createTextNode("แชร์ไว้ " + i.shares + " รายการ • คุณ: "));
-    var u = document.createElement("u"); u.textContent = me; u.title = "เปลี่ยนชื่อที่แสดง";
+    sub.appendChild(document.createTextNode(T(i.shares + " shared • you: ", "แชร์ไว้ " + i.shares + " รายการ • คุณ: ")));
+    var u = document.createElement("u"); u.textContent = me; u.title = T("Change the name shown", "เปลี่ยนชื่อที่แสดง");
     u.onclick = function () {
-      var n = prompt("ชื่อที่เครื่องอื่นจะเห็น", me);
+      var n = prompt(T("Name other computers see", "ชื่อที่เครื่องอื่นจะเห็น"), me);
       if (n && n.trim()) { me = n.trim().slice(0, 40); localStorage.setItem("lanshare.name", me); showInfo(); }
     };
     sub.appendChild(u);
@@ -452,9 +546,9 @@ function buildThemeGrid() {
     b.onclick = function () { setChoice(key); };
     g.appendChild(b);
   };
-  add("pc", "ตามเครื่อง", '<div class="mini" style="background:linear-gradient(120deg,var(--head1),var(--head2))">' +
+  add("pc", T("Like the PC", "ตามเครื่อง"), '<div class="mini" style="background:linear-gradient(120deg,var(--head1),var(--head2))">' +
     '<i style="left:50%;top:50%;width:22px;height:16px;margin:-8px 0 0 -11px;border:2px solid var(--text);background:none"></i></div>');
-  add("auto", "ตามมือถือ", '<div class="mini" style="background:linear-gradient(135deg,#17191f 50%,#f6f7fa 50%)"></div>');
+  add("auto", T("Like the phone", "ตามมือถือ"), '<div class="mini" style="background:linear-gradient(135deg,#17191f 50%,#f6f7fa 50%)"></div>');
   (themes || []).forEach(function (t) { add(t.name, t.label, mini(t)); });
 }
 $("themebtn").onclick = function () {
@@ -465,9 +559,9 @@ $("themebtn").onclick = function () {
 };
 $("sheetclose").onclick = function () { $("sheet").classList.remove("open"); };
 $("sheet").onclick = function (e) { if (e.target === this) this.classList.remove("open"); };
-// "ตามเครื่อง": pick up theme changes on the computer every 10 seconds
+// "Like the PC": pick up theme changes on the computer every 10 seconds
 setInterval(function () { if (themeChoice() === "pc") loadTheme(); }, 10000);
-// "ตามมือถือ": follow the phone switching between light and dark
+// "Like the phone": follow the phone switching between light and dark
 matchMedia("(prefers-color-scheme: light)").addEventListener("change", function () { if (themeChoice() === "auto") loadTheme(); });
 
 if (location.pathname === "/view") startViewer();

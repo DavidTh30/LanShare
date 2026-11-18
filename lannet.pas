@@ -7,10 +7,16 @@ unit LanNet;
   Full specification for other clients (e.g. an Android app): PROTOCOL.md
 
   - UDP broadcast discovery (port DISCOVERY_PORT):
-      'LSH2|id|tcpPort|name|os|caps|icon'
+      'LSH2|id|tcpPort|name|os|caps|icon|host|user|machine|version'
           os   = windows/linux/macos/android/...
           caps = comma list: bin,http,push
           icon = '<kind>.<color>' chosen by the user, e.g. 'laptop.2'
+          host, user = computer and login name (shown on request, not in the list)
+          machine = 'XXXX-XXXX-XXXX-XXXX', the same after renames and restarts:
+                    rows with the same machine and port are one computer
+          (fields after icon are new in 1.1; older versions stop at icon)
+      'LSH2BYE|id'                     sent when the program closes: peers
+                                       show it offline at once
       A machine answers a newly seen peer at once (unicast), announces to
       peers it knows and probes its /24 subnets, so machines also find each
       other on networks that drop broadcasts.
@@ -37,6 +43,21 @@ unit LanNet;
       <- totalFiles(int32) + totalBytes(int64) + ENTRIES
       -> 1 byte (1 = all received OK)
 
+    CMD_LISTX like CMD_LIST, for peers announcing the 'write' cap:
+      <- status(byte) [+ message(str)] + folderWritable(byte)
+      <- count(int32) + count * (name isDir size modified flags(byte: 1 = writable))
+
+    CMD_WRITE change a folder shared as "Read + Write" (refused elsewhere)
+      -> op(byte) + ...
+         1 mkdir   : path(str)                       new folder 'Share/sub/new'
+         2 delete  : count(int32) + count * path(str) (to the owner's Recycle Bin)
+         3 rename  : path(str) + newName(str)
+         4 upload  : folder(str) + totalFiles(int32) + totalBytes(int64)
+                     <- status(byte) + message(str)   then -> ENTRIES (names made unique)
+         5 replace : file(str) + size(int64)          save an edited file over the old one
+                     <- status(byte) + message(str)   then -> size bytes
+      <- status(byte) 1 = ok, 0 = refused + message(str) (1 is also followed by a str)
+
     ENTRIES = repeated kind(byte):
                 1 = dir : relPath(str)
                 2 = file: relPath(str) + size(int64) + data
@@ -52,16 +73,23 @@ unit LanNet;
 interface
 
 uses
-  Classes, SysUtils, sockets;
+  Classes, SysUtils, sockets, I18n;
 
 const
   DEFAULT_TCP_PORT = 50505;
   DISCOVERY_PORT   = 50506;
-  APP_VERSION      = '1.0.0';   // program version (also in LanShare.lpi VersionInfo)
+  APP_VERSION      = '1.1.0';   // program version (also in LanShare.lpi VersionInfo)
   PROTO_VERSION    = 2;
   CMD_PUSH = 1;
   CMD_LIST = 2;
   CMD_GET  = 3;
+  CMD_LISTX = 4;   // list with write permissions (peers with the 'write' cap)
+  CMD_WRITE = 5;   // change a Read + Write share
+  OP_MKDIR   = 1;
+  OP_DELETE  = 2;
+  OP_RENAME  = 3;
+  OP_UPLOAD  = 4;
+  OP_REPLACE = 5;
   KIND_END  = 0;
   KIND_DIR  = 1;
   KIND_FILE = 2;
@@ -86,6 +114,7 @@ type
     Size: Int64;
     Modified: TDateTime;
     LocalPath: string;   // only filled for our own shares
+    Writable: Boolean;   // others may add, rename, delete and edit inside
   end;
   TRemoteEntries = array of TRemoteEntry;
 
@@ -132,6 +161,7 @@ type
   private
     FLock: TRTLCriticalSection;
     FPaths: TStringList;
+    FWrite: TStringList;    // paths shared as Read + Write
     function NameOf(Index: Integer): string;
   public
     constructor Create;
@@ -140,9 +170,20 @@ type
     procedure Remove(const P: string);
     function Count: Integer;
     function Paths: TStringArray;
-    function RootEntries: TRemoteEntries;
+    { IncludeMissing: also shares whose file/folder is not there now (e.g. a
+      network or USB drive not connected yet) - only for this PC's own view }
+    function RootEntries(IncludeMissing: Boolean = False): TRemoteEntries;
     { Maps a virtual path ('Share/sub/file') to a local path. }
     function Resolve(const VPath: string; out Local: string): Boolean;
+    { Read + Write permission of a shared folder (files are always read only) }
+    procedure SetWritable(const P: string; W: Boolean);
+    function IsWritable(const P: string): Boolean;
+    { Maps a virtual path inside a Read + Write share to a local path that may
+      not exist yet. False: not in such a share, or an unusable name.
+      IsRoot: the path is the shared folder itself (cannot be renamed/deleted). }
+    function ResolveWrite(const VPath: string; out Local: string; out IsRoot: Boolean): Boolean;
+    { the folder VPath ('' = list of shares: never) accepts changes }
+    function FolderWritable(const VPath: string): Boolean;
   end;
 
   { CSS for a theme name ('' = unknown); set by the UI, so this unit does not
@@ -154,8 +195,17 @@ type
   TLogEvent = procedure(Sender: TObject; const Msg: string) of object;
   TAskEvent = function(Sender: TObject; const FromName, FromIP: string;
     FileCount: Integer; TotalBytes: Int64): Boolean of object;
+  { who a peer is, beyond the name its owner chose (empty from old versions) }
+  TPeerIdent = record
+    Host: string;      // computer name
+    User: string;      // login name
+    Machine: string;   // machine code, stable across renames and restarts
+    Version: string;   // LAN Share version
+  end;
+
   TPeerEvent = procedure(Sender: TObject; const ID, PeerName, IP: string; Port: Integer;
-    const OS, Caps, Icon: string) of object;
+    const OS, Caps, Icon: string; const Ident: TPeerIdent) of object;
+  TPeerGoneEvent = procedure(Sender: TObject; const ID: string) of object;
 
   { Base for all threads that talk TCP; reports progress to the UI }
   TNetThread = class(TThread)
@@ -235,6 +285,48 @@ type
       const AMyName: string; const APaths: TStringArray; const ADestDir: string);
   end;
 
+  TWriteThread = class;
+  TWriteDoneEvent = procedure(T: TWriteThread) of object;
+
+  { Changes a Read + Write share of another machine: new folder, delete,
+    rename, upload files into it, or save an edited file back (OP_*) }
+  TWriteThread = class(TNetThread)
+  private
+    FPort: Integer;
+    FMyName: string;
+    FOp: Byte;
+    FPaths: TStringArray;
+    FNewName: string;
+    FItems: TSendItems;
+    FLocalFile: string;
+    FOk: Boolean;
+    FError, FResult: string;
+    FOnDone: TWriteDoneEvent;
+    procedure DoDone;
+    procedure CheckReply;
+  protected
+    procedure Execute; override;
+  public
+    Tag: string;   // for the caller
+    { mkdir (1 path), delete (paths), rename (1 path + ANewName) }
+    constructor CreateOp(const AHost, APeerName: string; APort: Integer; const AMyName: string;
+      AOp: Byte; const APaths: TStringArray; const ANewName: string = '');
+    { files/folders (BuildSendItems) into the folder AFolder }
+    constructor CreateUpload(const AHost, APeerName: string; APort: Integer; const AMyName: string;
+      const AFolder: string; const AItems: TSendItems);
+    { save ALocalFile over the shared file AVPath }
+    constructor CreateReplace(const AHost, APeerName: string; APort: Integer; const AMyName: string;
+      const AVPath, ALocalFile: string);
+    property Op: Byte read FOp;
+    property Paths: TStringArray read FPaths;
+    property LocalFile: string read FLocalFile;
+    property Ok: Boolean read FOk;
+    property Error: string read FError;
+    property ResultMsg: string read FResult;
+    { called in the main thread when it ended (ok or not) }
+    property OnDone: TWriteDoneEvent read FOnDone write FOnDone;
+  end;
+
   TBrowseThread = class;
   TBrowseEvent = procedure(B: TBrowseThread) of object;
 
@@ -246,13 +338,18 @@ type
     FTag: Integer;
     FEntries: TRemoteEntries;
     FError: string;
+    FExtended, FWritable: Boolean;
     FOnDone: TBrowseEvent;
     procedure DoDone;
   protected
     procedure Execute; override;
   public
-    constructor Create(const AHost: string; APort: Integer; const AMyName, APath: string; ATag: Integer);
+    { AExtended: the peer has the 'write' cap: ask for permissions too }
+    constructor Create(const AHost: string; APort: Integer; const AMyName, APath: string; ATag: Integer;
+      AExtended: Boolean = False);
     property Path: string read FPath;
+    { the listed folder accepts changes (Read + Write share) }
+    property Writable: Boolean read FWritable;
     property Tag: Integer read FTag;
     property Entries: TRemoteEntries read FEntries;
     property Error: string read FError;
@@ -269,7 +366,14 @@ type
     FHttpSent, FHttpHead: Boolean;
     procedure DoAsk;
     procedure HandlePush;
-    procedure HandleList;
+    procedure HandleList(Extended: Boolean);
+    procedure HandleWrite;
+    function WriteMkdir(const Path: string): string;
+    function WriteDelete(const Path: string): string;
+    function WriteRename(const Path, NewName: string): string;
+    procedure HttpWriteCheck(const R: THttpReq);
+    procedure HttpWriteOp(const R: THttpReq);
+    procedure HttpUpload(const R: THttpReq);
     procedure HandleGet;
     { HTTP API (lanhttp.inc) }
     procedure HandleHttp(const First: string);
@@ -302,7 +406,7 @@ type
     FShares: TShareList;
     FLock: TRTLCriticalSection;
     FSessions: TList;
-    FMyName, FMyID, FMyIcon, FThemeCss, FThemesJson: string;
+    FMyName, FMyID, FMyIcon, FThemeCss, FThemesJson, FLang: string;
     FThemeCssFunc: TThemeCssFunc;
     function GetDownloadDir: string;
     function GetIdent(AIndex: Integer): string;
@@ -328,6 +432,8 @@ type
     property ThemeCss: string index 3 read GetIdent write SetIdent;
     { list of themes (JSON) and CSS per theme name, for the web theme picker }
     property ThemesJson: string index 4 read GetIdent write SetIdent;
+    { interface language of the PC ('en', 'th'): the web page follows it }
+    property Lang: string index 5 read GetIdent write SetIdent;
     property ThemeCssFunc: TThemeCssFunc read FThemeCssFunc write FThemeCssFunc;
     property Port: Integer read FPort;
     property DownloadDir: string read GetDownloadDir write SetDownloadDir;
@@ -343,14 +449,20 @@ type
     FLock: TRTLCriticalSection;
     FSock: TSock;
     FID, FName, FIcon: string;
+    FHost, FUser, FMachine: string;
     FTcpPort: Integer;
+    FScanNow: Boolean;       // set by RescanNow: probe the subnets at once
     FTargets: TStringList;   // known peer addresses: announced to by unicast
     FSeen: TStringList;      // peer IDs we already answered
     FPeerID, FPeerName, FPeerIP, FPeerOS, FPeerCaps, FPeerIcon: string;
+    FPeerIdent: TPeerIdent;
     FPeerPort: Integer;
     FOnPeer: TPeerEvent;
+    FOnPeerGone: TPeerGoneEvent;
     procedure DoPeer;
+    procedure DoPeerGone;
     function Packet: string;
+    procedure SendEverywhere(const Msg: string);
     procedure SendPacket(const Host, Msg: string);
     procedure Broadcast;
     procedure ScanSubnets;
@@ -361,11 +473,18 @@ type
     destructor Destroy; override;
     procedure StopDiscovery;
     procedure AnnounceNow;
+    { Refresh: announce now and probe the subnets again (thread-safe) }
+    procedure RescanNow;
     { change the name/icon others see (thread-safe) }
     procedure SetIdentity(const AName, AIcon: string);
+    { computer name, user and machine code sent with every announcement }
+    procedure SetMachine(const AHost, AUser, AMachine: string);
     { remember an address to announce to directly (thread-safe) }
     procedure AddTarget(const IP: string);
+    { tell everyone we are closing (call from the main thread before StopDiscovery) }
+    procedure SayGoodbye;
     property OnPeer: TPeerEvent read FOnPeer write FOnPeer;
+    property OnPeerGone: TPeerGoneEvent read FOnPeerGone write FOnPeerGone;
   end;
 
 function GetLocalIPs: TStringArray;
@@ -386,7 +505,7 @@ implementation
 
 uses
   {$IFDEF UNIX} BaseUnix, Unix, UnixType, ctypes, {$ENDIF}
-  DateUtils, Math, resolve;
+  DateUtils, Math, resolve, FileOps;
 
 {$IFDEF WINDOWS}
 { The Windows "sockets" unit does not re-export these Winsock constants.
@@ -646,7 +765,7 @@ begin
   begin
     N := fpsend(S, P, Len, SendFlags);
     if N <= 0 then
-      raise ENetError.CreateFmt('การเชื่อมต่อขาดระหว่างส่ง (error %d)', [socketerror]);
+      raise ENetError.CreateFmt(L('Connection lost while sending (error %d)', 'การเชื่อมต่อขาดระหว่างส่ง (error %d)'), [socketerror]);
     Inc(P, N);
     Dec(Len, N);
   end;
@@ -662,9 +781,9 @@ begin
   begin
     N := fprecv(S, P, Len, 0);
     if N = 0 then
-      raise ENetError.Create('อีกฝั่งปิดการเชื่อมต่อ');
+      raise ENetError.Create(L('The other side closed the connection', 'อีกฝั่งปิดการเชื่อมต่อ'));
     if N < 0 then
-      raise ENetError.CreateFmt('การเชื่อมต่อขาดระหว่างรับ (error %d)', [socketerror]);
+      raise ENetError.CreateFmt(L('Connection lost while receiving (error %d)', 'การเชื่อมต่อขาดระหว่างรับ (error %d)'), [socketerror]);
     Inc(P, N);
     Dec(Len, N);
   end;
@@ -743,7 +862,7 @@ begin
     R := THostResolver.Create(nil);
     try
       if not R.NameLookup(Host) then
-        raise ENetError.CreateFmt('หาเครื่อง "%s" ไม่เจอ', [Host]);
+        raise ENetError.CreateFmt(L('Cannot find computer "%s"', 'หาเครื่อง "%s" ไม่เจอ'), [Host]);
       Result.sin_addr := R.NetHostAddress;
     finally
       R.Free;
@@ -950,11 +1069,13 @@ constructor TShareList.Create;
 begin
   InitCriticalSection(FLock);
   FPaths := TStringList.Create;
+  FWrite := TStringList.Create;
 end;
 
 destructor TShareList.Destroy;
 begin
   FPaths.Free;
+  FWrite.Free;
   DoneCriticalSection(FLock);
   inherited Destroy;
 end;
@@ -998,6 +1119,8 @@ begin
   try
     I := FPaths.IndexOf(P);
     if I >= 0 then FPaths.Delete(I);
+    I := FWrite.IndexOf(P);
+    if I >= 0 then FWrite.Delete(I);
   finally
     LeaveCriticalSection(FLock);
   end;
@@ -1027,30 +1150,35 @@ begin
   end;
 end;
 
-function TShareList.RootEntries: TRemoteEntries;
+function TShareList.RootEntries(IncludeMissing: Boolean): TRemoteEntries;
 var
-  I: Integer;
+  I, N: Integer;
   SR: TSearchRec;
   P: string;
 begin
   EnterCriticalSection(FLock);
   try
     SetLength(Result, FPaths.Count);
+    N := 0;
     for I := 0 to FPaths.Count - 1 do
     begin
       P := FPaths[I];
-      Result[I].Name := NameOf(I);
-      Result[I].LocalPath := P;
-      Result[I].IsDir := DirectoryExists(P);
-      Result[I].Size := 0;
-      Result[I].Modified := 0;
+      if not IncludeMissing and not (DirectoryExists(P) or FileExists(P)) then Continue;
+      Result[N].Name := NameOf(I);
+      Result[N].LocalPath := P;
+      Result[N].IsDir := DirectoryExists(P);
+      Result[N].Writable := Result[N].IsDir and (FWrite.IndexOf(P) >= 0);
+      Result[N].Size := 0;
+      Result[N].Modified := 0;
       if FindFirst(ExcludeTrailingPathDelimiter(P), faAnyFile, SR) = 0 then
       begin
-        if not Result[I].IsDir then Result[I].Size := SR.Size;
-        Result[I].Modified := SR.TimeStamp;
+        if not Result[N].IsDir then Result[N].Size := SR.Size;
+        Result[N].Modified := SR.TimeStamp;
         FindClose(SR);
       end;
+      Inc(N);
     end;
+    SetLength(Result, N);
   finally
     LeaveCriticalSection(FLock);
   end;
@@ -1079,6 +1207,72 @@ begin
   finally
     LeaveCriticalSection(FLock);
   end;
+end;
+
+procedure TShareList.SetWritable(const P: string; W: Boolean);
+var
+  I: Integer;
+begin
+  EnterCriticalSection(FLock);
+  try
+    I := FWrite.IndexOf(P);
+    if W and (I < 0) then FWrite.Add(P)
+    else if (not W) and (I >= 0) then FWrite.Delete(I);
+  finally
+    LeaveCriticalSection(FLock);
+  end;
+end;
+
+function TShareList.IsWritable(const P: string): Boolean;
+begin
+  EnterCriticalSection(FLock);
+  try
+    Result := FWrite.IndexOf(P) >= 0;
+  finally
+    LeaveCriticalSection(FLock);
+  end;
+end;
+
+function TShareList.ResolveWrite(const VPath: string; out Local: string; out IsRoot: Boolean): Boolean;
+var
+  Parts: TStringArray;
+  I, J: Integer;
+begin
+  Result := False;
+  Local := '';
+  IsRoot := False;
+  try
+    Parts := SplitSafe(VPath);         // refuses '..' and empty parts
+  except
+    Exit;
+  end;
+  // every name below the share must be a plain, valid name on this OS
+  // (no drive letters, no NTFS streams 'a:b', no separators)
+  for J := 1 to High(Parts) do
+    if not ValidNewName(Parts[J]) then Exit;
+  EnterCriticalSection(FLock);
+  try
+    for I := 0 to FPaths.Count - 1 do
+      if NameOf(I) = Parts[0] then
+      begin
+        if (FWrite.IndexOf(FPaths[I]) < 0) or not DirectoryExists(FPaths[I]) then Exit;
+        Local := ExcludeTrailingPathDelimiter(FPaths[I]);
+        for J := 1 to High(Parts) do
+          Local := Local + PathDelim + Parts[J];
+        IsRoot := Length(Parts) = 1;
+        Exit(True);
+      end;
+  finally
+    LeaveCriticalSection(FLock);
+  end;
+end;
+
+function TShareList.FolderWritable(const VPath: string): Boolean;
+var
+  Local: string;
+  IsRoot: Boolean;
+begin
+  Result := (VPath <> '') and ResolveWrite(VPath, Local, IsRoot) and DirectoryExists(Local);
 end;
 
 { ---------- TNetThread ---------- }
@@ -1172,7 +1366,7 @@ begin
   SetOpt(FSock, SO_NOSIGPIPE);   // macOS
   {$ENDIF}
   if fpconnect(FSock, psockaddr(@Addr), SizeOf(Addr)) <> 0 then
-    raise ENetError.CreateFmt('เชื่อมต่อ %s:%d ไม่ได้ (error %d)', [Host, Port, socketerror]);
+    raise ENetError.CreateFmt(L('Cannot connect to %s:%d (error %d)', 'เชื่อมต่อ %s:%d ไม่ได้ (error %d)'), [Host, Port, socketerror]);
 end;
 
 procedure TNetThread.SendHeader(Cmd: Byte; const MyName: string);
@@ -1192,7 +1386,7 @@ begin
   SetLength(Buf, BUF_SIZE);
   for I := 0 to High(Items) do
   begin
-    if Terminated then raise ENetError.Create('ยกเลิกแล้ว');
+    if Terminated then raise ENetError.Create(L('Cancelled', 'ยกเลิกแล้ว'));
     case Items[I].Kind of
       KIND_DIR:
         begin
@@ -1215,7 +1409,7 @@ begin
                 Inc(FDone, N);
                 Report;
               end;
-              if Terminated then raise ENetError.Create('ยกเลิกแล้ว');
+              if Terminated then raise ENetError.Create(L('Cancelled', 'ยกเลิกแล้ว'));
             until N <= 0;
           finally
             FS.Free;
@@ -1239,7 +1433,7 @@ begin
   ForceDirectories(FDestRoot);
   SetLength(Buf, BUF_SIZE);
   repeat
-    if Terminated then raise ENetError.Create('ยกเลิกแล้ว');
+    if Terminated then raise ENetError.Create(L('Cancelled', 'ยกเลิกแล้ว'));
     K := RecvByte(FSock);
     case K of
       KIND_END: Break;
@@ -1262,7 +1456,7 @@ begin
             begin
               if Left > BUF_SIZE then N := BUF_SIZE else N := Left;
               N := fprecv(FSock, @Buf[0], N, 0);
-              if N <= 0 then raise ENetError.Create('การเชื่อมต่อขาด');
+              if N <= 0 then raise ENetError.Create(L('Connection lost', 'การเชื่อมต่อขาด'));
               FS.WriteBuffer(Buf[0], N);
               Dec(Left, N);
               Inc(FDone, N);
@@ -1274,7 +1468,7 @@ begin
           Inc(Result);
         end;
     else
-      raise ENetError.CreateFmt('ข้อมูลผิดรูปแบบ (kind %d)', [K]);
+      raise ENetError.CreateFmt(L('Invalid data (kind %d)', 'ข้อมูลผิดรูปแบบ (kind %d)'), [K]);
     end;
   until False;
 end;
@@ -1310,22 +1504,22 @@ begin
   if FFileCount = 1 then
     for I := 0 to High(FItems) do
       if FItems[I].Kind = KIND_FILE then FTitle := ExtractFileName(FItems[I].LocalPath);
-  if FTitle = '' then FTitle := Format('%d ไฟล์', [FFileCount]);
+  if FTitle = '' then FTitle := Format(L('%d file(s)', '%d ไฟล์'), [FFileCount]);
 end;
 
 procedure TSendThread.Execute;
 begin
   try
-    SetState(tsConnecting, 'กำลังเชื่อมต่อ...');
+    SetState(tsConnecting, L('Connecting...', 'กำลังเชื่อมต่อ...'));
     ConnectTo(FPeerIP, FPort);
     SendHeader(CMD_PUSH, FMyName);
     SendInt32(FSock, FFileCount);
     SendInt64(FSock, FTotal);
-    SetState(tsWaiting, 'รอปลายทางกดยอมรับ...');
+    SetState(tsWaiting, L('Waiting for the other side to accept...', 'รอปลายทางกดยอมรับ...'));
     if RecvByte(FSock) <> 1 then
     begin
-      SetState(tsRejected, 'ปลายทางปฏิเสธ');
-      Log(Format('%s ปฏิเสธการรับ %s', [FPeerName, FTitle]));
+      SetState(tsRejected, L('Declined by the other side', 'ปลายทางปฏิเสธ'));
+      Log(Format(L('%s declined %s', '%s ปฏิเสธการรับ %s'), [FPeerName, FTitle]));
     end
     else
     begin
@@ -1334,8 +1528,8 @@ begin
       SendItems(FItems);
       if RecvByte(FSock) = 1 then
       begin
-        SetState(tsDone, 'ส่งสำเร็จ');
-        Log(Format('ส่ง %s (%s) ไปยัง %s สำเร็จ', [FTitle, FormatBytes(FTotal), FPeerName]));
+        SetState(tsDone, L('Sent', 'ส่งสำเร็จ'));
+        Log(Format(L('Sent %s (%s) to %s', 'ส่ง %s (%s) ไปยัง %s สำเร็จ'), [FTitle, FormatBytes(FTotal), FPeerName]));
       end;
     end;
   except
@@ -1343,7 +1537,7 @@ begin
     begin
       FState := tsFailed;
       FMsg := E.Message;
-      Log('ส่งไม่สำเร็จ: ' + E.Message);
+      Log(L('Send failed: ', 'ส่งไม่สำเร็จ: ') + E.Message);
     end;
   end;
   if FSock <> INVALID_SOCK then CloseSocket(FSock);
@@ -1372,7 +1566,7 @@ begin
     FTitle := Copy(P, LastDelimiter('/', P) + 1, MaxInt);
   end
   else
-    FTitle := Format('%d รายการ', [Length(FPaths)]);
+    FTitle := Format(L('%d items', '%d รายการ'), [Length(FPaths)]);
 end;
 
 procedure TDownloadThread.Execute;
@@ -1380,7 +1574,7 @@ var
   I, Files: Integer;
 begin
   try
-    SetState(tsConnecting, 'กำลังเชื่อมต่อ...');
+    SetState(tsConnecting, L('Connecting...', 'กำลังเชื่อมต่อ...'));
     ConnectTo(FPeerIP, FPort);
     SetTimeout(FSock, 60000);
     SendHeader(CMD_GET, FMyName);
@@ -1394,15 +1588,15 @@ begin
     SetState(tsRunning, '');
     Files := RecvItems;
     SendByte(FSock, 1);
-    SetState(tsDone, 'ดาวน์โหลดสำเร็จ');
-    Log(Format('ดาวน์โหลด %s (%d ไฟล์, %s) จาก %s สำเร็จ',
+    SetState(tsDone, L('Downloaded', 'ดาวน์โหลดสำเร็จ'));
+    Log(Format(L('Downloaded %s (%d files, %s) from %s', 'ดาวน์โหลด %s (%d ไฟล์, %s) จาก %s สำเร็จ'),
       [FTitle, Files, FormatBytes(FDone), FPeerName]));
   except
     on E: Exception do
     begin
       FState := tsFailed;
       FMsg := E.Message;
-      Log('ดาวน์โหลดไม่สำเร็จ: ' + E.Message);
+      Log(L('Download failed: ', 'ดาวน์โหลดไม่สำเร็จ: ') + E.Message);
     end;
   end;
   if FSock <> INVALID_SOCK then CloseSocket(FSock);
@@ -1410,13 +1604,170 @@ begin
   Report(True);
 end;
 
+{ ---------- TWriteThread ---------- }
+
+constructor TWriteThread.CreateOp(const AHost, APeerName: string; APort: Integer;
+  const AMyName: string; AOp: Byte; const APaths: TStringArray; const ANewName: string);
+begin
+  inherited Create;
+  FKind := tkSend;
+  FPeerIP := AHost;
+  FPeerName := APeerName;
+  FPort := APort;
+  FMyName := AMyName;
+  FOp := AOp;
+  FPaths := Copy(APaths);
+  FNewName := ANewName;
+  if Length(FPaths) > 0 then FTitle := Copy(FPaths[0], LastDelimiter('/', FPaths[0]) + 1, MaxInt);
+end;
+
+constructor TWriteThread.CreateUpload(const AHost, APeerName: string; APort: Integer;
+  const AMyName: string; const AFolder: string; const AItems: TSendItems);
+var
+  I: Integer;
+begin
+  inherited Create;
+  FKind := tkSend;
+  FPeerIP := AHost;
+  FPeerName := APeerName;
+  FPort := APort;
+  FMyName := AMyName;
+  FOp := OP_UPLOAD;
+  SetLength(FPaths, 1);
+  FPaths[0] := AFolder;
+  FItems := Copy(AItems);
+  for I := 0 to High(FItems) do
+    if FItems[I].Kind = KIND_FILE then
+    begin
+      Inc(FTotal, FItems[I].Size);
+      Inc(FFileCount);
+      FTitle := ExtractFileName(FItems[I].LocalPath);
+    end;
+  if FFileCount <> 1 then FTitle := Format(L('%d file(s)', '%d ไฟล์'), [FFileCount]);
+end;
+
+constructor TWriteThread.CreateReplace(const AHost, APeerName: string; APort: Integer;
+  const AMyName: string; const AVPath, ALocalFile: string);
+var
+  SR: TSearchRec;
+begin
+  inherited Create;
+  FKind := tkSend;
+  FPeerIP := AHost;
+  FPeerName := APeerName;
+  FPort := APort;
+  FMyName := AMyName;
+  FOp := OP_REPLACE;
+  SetLength(FPaths, 1);
+  FPaths[0] := AVPath;
+  FLocalFile := ALocalFile;
+  FFileCount := 1;
+  FTitle := ExtractFileName(ALocalFile);
+  if FindFirst(ALocalFile, faAnyFile, SR) = 0 then
+  begin
+    FTotal := SR.Size;
+    FindClose(SR);
+  end;
+end;
+
+procedure TWriteThread.DoDone;
+begin
+  if Assigned(FOnDone) then FOnDone(Self);
+end;
+
+procedure TWriteThread.CheckReply;
+begin
+  if RecvByte(FSock) <> 1 then raise ENetError.Create(RecvStr(FSock));
+  FResult := RecvStr(FSock);
+end;
+
+procedure TWriteThread.Execute;
+var
+  I, N: Integer;
+  FS: TFileStream;
+  Buf: array of Byte;
+begin
+  try
+    SetState(tsConnecting, L('Connecting...', 'กำลังเชื่อมต่อ...'));
+    ConnectTo(FPeerIP, FPort);
+    SetTimeout(FSock, 60000);
+    SendHeader(CMD_WRITE, FMyName);
+    SendByte(FSock, FOp);
+    case FOp of
+      OP_MKDIR:
+        SendStr(FSock, FPaths[0]);
+      OP_DELETE:
+        begin
+          SendInt32(FSock, Length(FPaths));
+          for I := 0 to High(FPaths) do SendStr(FSock, FPaths[I]);
+        end;
+      OP_RENAME:
+        begin
+          SendStr(FSock, FPaths[0]);
+          SendStr(FSock, FNewName);
+        end;
+      OP_UPLOAD:
+        begin
+          SendStr(FSock, FPaths[0]);
+          SendInt32(FSock, FFileCount);
+          SendInt64(FSock, FTotal);
+          CheckReply;
+          SetState(tsRunning, '');
+          SendItems(FItems);
+        end;
+      OP_REPLACE:
+        begin
+          FS := TFileStream.Create(FLocalFile, fmOpenRead or fmShareDenyNone);
+          try
+            FTotal := FS.Size;
+            SendStr(FSock, FPaths[0]);
+            SendInt64(FSock, FTotal);
+            CheckReply;
+            SetState(tsRunning, '');
+            SetLength(Buf, BUF_SIZE);
+            repeat
+              if Terminated then raise ENetError.Create(L('Cancelled', 'ยกเลิกแล้ว'));
+              N := FS.Read(Buf[0], BUF_SIZE);
+              if N > 0 then
+              begin
+                SockSendAll(FSock, Buf[0], N);
+                Inc(FDone, N);
+                Report;
+              end;
+            until N <= 0;
+          finally
+            FS.Free;
+          end;
+        end;
+    end;
+    CheckReply;
+    FOk := True;
+    if FOp in [OP_UPLOAD, OP_REPLACE] then
+      SetState(tsDone, L('Sent', 'ส่งสำเร็จ'))
+    else
+      FState := tsDone;
+  except
+    on E: Exception do
+    begin
+      FState := tsFailed;
+      FMsg := E.Message;
+      FError := E.Message;
+    end;
+  end;
+  if FSock <> INVALID_SOCK then CloseSocket(FSock);
+  FSock := INVALID_SOCK;
+  Report(True);
+  Synchronize(@DoDone);
+end;
+
 { ---------- TBrowseThread ---------- }
 
 constructor TBrowseThread.Create(const AHost: string; APort: Integer;
-  const AMyName, APath: string; ATag: Integer);
+  const AMyName, APath: string; ATag: Integer; AExtended: Boolean);
 begin
   inherited Create(True);
   FreeOnTerminate := True;
+  FExtended := AExtended;
   FHost := AHost;
   FPort := APort;
   FMyName := AMyName;
@@ -1444,17 +1795,18 @@ begin
     SetOpt(S, SO_NOSIGPIPE);
     {$ENDIF}
     if fpconnect(S, psockaddr(@Addr), SizeOf(Addr)) <> 0 then
-      raise ENetError.CreateFmt('เชื่อมต่อ %s ไม่ได้ (error %d)', [FHost, socketerror]);
+      raise ENetError.CreateFmt(L('Cannot connect to %s (error %d)', 'เชื่อมต่อ %s ไม่ได้ (error %d)'), [FHost, socketerror]);
     SetTimeout(S, 15000);
     SockSendAll(S, PChar('LSHR')^, 4);
     SendByte(S, PROTO_VERSION);
-    SendByte(S, CMD_LIST);
+    if FExtended then SendByte(S, CMD_LISTX) else SendByte(S, CMD_LIST);
     SendStr(S, FMyName);
     SendStr(S, FPath);
     if RecvByte(S) <> 1 then
       raise ENetError.Create(RecvStr(S));
+    if FExtended then FWritable := RecvByte(S) = 1;
     N := RecvInt32(S);
-    if (N < 0) or (N > 1000000) then raise ENetError.Create('ข้อมูลผิดรูปแบบ');
+    if (N < 0) or (N > 1000000) then raise ENetError.Create(L('Invalid data', 'ข้อมูลผิดรูปแบบ'));
     SetLength(FEntries, N);
     for I := 0 to N - 1 do
     begin
@@ -1462,6 +1814,7 @@ begin
       FEntries[I].IsDir := RecvByte(S) = 1;
       FEntries[I].Size := RecvInt64(S);
       FEntries[I].Modified := UnixToDateTime(RecvInt64(S), False);
+      if FExtended then FEntries[I].Writable := (RecvByte(S) and 1) <> 0;
     end;
   except
     on E: Exception do
@@ -1500,12 +1853,12 @@ begin
   FKind := tkReceive;
   FFileCount := RecvInt32(FSock);
   FTotal := RecvInt64(FSock);
-  FTitle := Format('%d ไฟล์', [FFileCount]);
+  FTitle := Format(L('%d file(s)', '%d ไฟล์'), [FFileCount]);
   Synchronize(@DoAsk);
   if not FAccepted then
   begin
     SendByte(FSock, 0);
-    Log(Format('ปฏิเสธไฟล์จาก %s (%s)', [FPeerName, FPeerIP]));
+    Log(Format(L('Declined files from %s (%s)', 'ปฏิเสธไฟล์จาก %s (%s)'), [FPeerName, FPeerIP]));
     Exit;
   end;
   SendByte(FSock, 1);
@@ -1515,8 +1868,8 @@ begin
   try
     Files := RecvItems;
     SendByte(FSock, 1);
-    SetState(tsDone, 'รับสำเร็จ');
-    Log(Format('รับ %d ไฟล์ (%s) จาก %s สำเร็จ', [Files, FormatBytes(FDone), FPeerName]));
+    SetState(tsDone, L('Received', 'รับสำเร็จ'));
+    Log(Format(L('Received %d file(s) (%s) from %s', 'รับ %d ไฟล์ (%s) จาก %s สำเร็จ'), [Files, FormatBytes(FDone), FPeerName]));
   except
     on E: Exception do
     begin
@@ -1526,11 +1879,12 @@ begin
   end;
 end;
 
-procedure TServeThread.HandleList;
+procedure TServeThread.HandleList(Extended: Boolean);
 var
   Path, Local: string;
   E: TRemoteEntries;
   I: Integer;
+  W: Boolean;
 begin
   Path := RecvStr(FSock);
   if Path = '' then
@@ -1540,10 +1894,12 @@ begin
   else
   begin
     SendByte(FSock, 0);
-    SendStr(FSock, 'ไม่พบโฟลเดอร์นี้ หรือเลิกแชร์แล้ว');
+    SendStr(FSock, L('Folder not found or no longer shared', 'ไม่พบโฟลเดอร์นี้ หรือเลิกแชร์แล้ว'));
     Exit;
   end;
+  W := FOwner.Shares.FolderWritable(Path);
   SendByte(FSock, 1);
+  if Extended then SendByte(FSock, Ord(W));
   SendInt32(FSock, Length(E));
   for I := 0 to High(E) do
   begin
@@ -1554,6 +1910,211 @@ begin
       SendInt64(FSock, DateTimeToUnix(E[I].Modified, False))
     else
       SendInt64(FSock, 0);
+    // at the top: each share's own permission; inside: the folder's
+    if Extended then
+      if Path = '' then SendByte(FSock, Ord(E[I].Writable)) else SendByte(FSock, Ord(W));
+  end;
+end;
+
+{ ---------- changes in Read + Write shares (binary and HTTP) ---------- }
+
+const
+  NO_WRITE_EN = 'This folder is read only, or the name is not allowed';
+  NO_WRITE_TH = 'โฟลเดอร์นี้อ่านได้อย่างเดียว หรือใช้ชื่อนี้ไม่ได้';
+  NO_ROOT_EN = 'The shared folder itself cannot be renamed or deleted';
+  NO_ROOT_TH = 'เปลี่ยนชื่อหรือลบโฟลเดอร์ที่แชร์เองไม่ได้';
+
+function TServeThread.WriteMkdir(const Path: string): string;
+var
+  Local: string;
+  IsRoot: Boolean;
+begin
+  if not FOwner.Shares.ResolveWrite(Path, Local, IsRoot) or IsRoot then
+    raise ENetError.Create(L(NO_WRITE_EN, NO_WRITE_TH));
+  if FileExists(Local) or DirectoryExists(Local) then
+    raise ENetError.Create(L('A file or folder with this name already exists', 'มีไฟล์หรือโฟลเดอร์ชื่อนี้อยู่แล้ว'));
+  if not DirectoryExists(ExtractFileDir(Local)) or not CreateDir(Local) then
+    raise ENetError.Create(L('Cannot create the folder', 'สร้างโฟลเดอร์ไม่ได้'));
+  Result := Format(L('%s created folder %s', '%s สร้างโฟลเดอร์ %s'), [FPeerName, Path]);
+  Log(Result);
+end;
+
+function TServeThread.WriteDelete(const Path: string): string;
+var
+  Local: string;
+  IsRoot: Boolean;
+begin
+  if not FOwner.Shares.ResolveWrite(Path, Local, IsRoot) then
+    raise ENetError.Create(L(NO_WRITE_EN, NO_WRITE_TH));
+  if IsRoot then raise ENetError.Create(L(NO_ROOT_EN, NO_ROOT_TH));
+  if not (FileExists(Local) or DirectoryExists(Local)) then
+    raise ENetError.Create(L('Not found (already deleted?)', 'ไม่พบ (อาจถูกลบไปแล้ว)'));
+  if not RemoveToTrash(Local) then
+    raise ENetError.Create(L('Cannot delete (in use?): ', 'ลบไม่ได้ (เปิดใช้อยู่?): ') + Path);
+  Result := Format(L('%s deleted %s (in the Recycle Bin)', '%s ลบ %s (อยู่ในถังขยะ)'), [FPeerName, Path]);
+  Log(Result);
+end;
+
+function TServeThread.WriteRename(const Path, NewName: string): string;
+var
+  Local, Target: string;
+  IsRoot: Boolean;
+begin
+  if not FOwner.Shares.ResolveWrite(Path, Local, IsRoot) or not ValidNewName(NewName) then
+    raise ENetError.Create(L(NO_WRITE_EN, NO_WRITE_TH));
+  if IsRoot then raise ENetError.Create(L(NO_ROOT_EN, NO_ROOT_TH));
+  if not (FileExists(Local) or DirectoryExists(Local)) then
+    raise ENetError.Create(L('Not found (already deleted?)', 'ไม่พบ (อาจถูกลบไปแล้ว)'));
+  Target := ExtractFilePath(Local) + NewName;
+  // the same item with other letter case is fine (Windows names ignore case)
+  if (FileExists(Target) or DirectoryExists(Target)) and not SameText(Target, Local) then
+    raise ENetError.Create(L('A file or folder with this name already exists', 'มีไฟล์หรือโฟลเดอร์ชื่อนี้อยู่แล้ว'));
+  if not RenameFile(Local, Target) then
+    raise ENetError.Create(L('Cannot rename (in use?)', 'เปลี่ยนชื่อไม่ได้ (เปิดใช้อยู่?)'));
+  Result := Format(L('%s renamed %s to %s', '%s เปลี่ยนชื่อ %s เป็น %s'), [FPeerName, Path, NewName]);
+  Log(Result);
+end;
+
+procedure TServeThread.HandleWrite;
+var
+  Op: Byte;
+  Path, Local, Tmp, OpMsg, NewName: string;
+  IsRoot: Boolean;
+  I, N: Integer;
+  Paths: TStringArray;
+  Size, Left: Int64;
+  FS: TFileStream;
+  Buf: array of Byte;
+  Got: Integer;
+
+  procedure Reply(Ok: Boolean; const S: string);
+  begin
+    SendByte(FSock, Ord(Ok));
+    SendStr(FSock, S);
+  end;
+
+begin
+  Op := RecvByte(FSock);
+  case Op of
+    OP_MKDIR, OP_DELETE, OP_RENAME:
+      begin
+        Paths := nil;
+        NewName := '';
+        if Op = OP_DELETE then
+        begin
+          N := RecvInt32(FSock);
+          if (N <= 0) or (N > 10000) then raise ENetError.Create(L('Invalid data', 'ข้อมูลผิดรูปแบบ'));
+          SetLength(Paths, N);
+          for I := 0 to N - 1 do Paths[I] := RecvStr(FSock);
+        end
+        else
+        begin
+          SetLength(Paths, 1);
+          Paths[0] := RecvStr(FSock);
+          if Op = OP_RENAME then NewName := RecvStr(FSock);
+        end;
+        try
+          OpMsg := '';
+          for I := 0 to High(Paths) do
+            case Op of
+              OP_MKDIR:  OpMsg := WriteMkdir(Paths[I]);
+              OP_DELETE: OpMsg := WriteDelete(Paths[I]);
+              OP_RENAME: OpMsg := WriteRename(Paths[I], NewName);
+            end;
+          Reply(True, OpMsg);
+        except
+          on E: Exception do Reply(False, E.Message);
+        end;
+      end;
+    OP_UPLOAD:
+      begin
+        Path := RecvStr(FSock);
+        FFileCount := RecvInt32(FSock);
+        FTotal := RecvInt64(FSock);
+        if not (FOwner.Shares.ResolveWrite(Path, Local, IsRoot) and DirectoryExists(Local)) then
+        begin
+          Reply(False, L(NO_WRITE_EN, NO_WRITE_TH));
+          Exit;
+        end;
+        Reply(True, '');
+        FKind := tkReceive;
+        FTitle := Format(L('%d file(s)', '%d ไฟล์'), [FFileCount]);
+        FDestRoot := Local;      // names that exist get " (1)": nothing is overwritten
+        SetTimeout(FSock, 60000);
+        SetState(tsRunning, '');
+        try
+          N := RecvItems;
+          Reply(True, '');
+          SetState(tsDone, L('Received', 'รับสำเร็จ'));
+          Log(Format(L('%s added %d file(s) to %s', '%s เพิ่ม %d ไฟล์ใน %s'), [FPeerName, N, Path]));
+        except
+          on E: Exception do
+          begin
+            SetState(tsFailed, E.Message);
+            raise;
+          end;
+        end;
+      end;
+    OP_REPLACE:
+      begin
+        Path := RecvStr(FSock);
+        Size := RecvInt64(FSock);
+        if not (FOwner.Shares.ResolveWrite(Path, Local, IsRoot) and not IsRoot and
+                DirectoryExists(ExtractFileDir(Local)) and not DirectoryExists(Local)) or (Size < 0) then
+        begin
+          Reply(False, L(NO_WRITE_EN, NO_WRITE_TH));
+          Exit;
+        end;
+        Reply(True, '');
+        FKind := tkReceive;
+        FTitle := ExtractFileName(Local);
+        FFileCount := 1;
+        FTotal := Size;
+        SetTimeout(FSock, 60000);
+        SetState(tsRunning, '');
+        // write next to it first: the old file stays whole until all arrived
+        Tmp := Local + '.lanshare-part';
+        try
+          FS := TFileStream.Create(Tmp, fmCreate);
+          try
+            SetLength(Buf, BUF_SIZE);
+            Left := Size;
+            while Left > 0 do
+            begin
+              if Left > BUF_SIZE then Got := BUF_SIZE else Got := Left;
+              Got := fprecv(FSock, @Buf[0], Got, 0);
+              if Got <= 0 then raise ENetError.Create(L('Connection lost', 'การเชื่อมต่อขาด'));
+              FS.WriteBuffer(Buf[0], Got);
+              Dec(Left, Got);
+              Inc(FDone, Got);
+              Report;
+            end;
+          finally
+            FS.Free;
+          end;
+        except
+          on E: Exception do
+          begin
+            SysUtils.DeleteFile(Tmp);
+            SetState(tsFailed, E.Message);
+            raise;
+          end;
+        end;
+        if ReplaceFileWith(Tmp, Local) then
+        begin
+          Reply(True, '');
+          SetState(tsDone, L('Saved', 'บันทึกแล้ว'));
+          Log(Format(L('%s saved %s', '%s บันทึก %s'), [FPeerName, Path]));
+        end
+        else
+        begin
+          SysUtils.DeleteFile(Tmp);
+          SetState(tsFailed, L('Cannot save (file in use?)', 'บันทึกไม่ได้ (ไฟล์เปิดใช้อยู่?)'));
+          Reply(False, L('Cannot save (file in use?)', 'บันทึกไม่ได้ (ไฟล์เปิดใช้อยู่?)'));
+        end;
+      end;
+  else
+    raise ENetError.CreateFmt('Unknown write operation %d', [Op]);
   end;
 end;
 
@@ -1566,7 +2127,7 @@ var
 begin
   FKind := tkServe;
   N := RecvInt32(FSock);
-  if (N <= 0) or (N > 10000) then raise ENetError.Create('ข้อมูลผิดรูปแบบ');
+  if (N <= 0) or (N > 10000) then raise ENetError.Create(L('Invalid data', 'ข้อมูลผิดรูปแบบ'));
   SetLength(Paths, N);
   for I := 0 to N - 1 do
     Paths[I] := RecvStr(FSock);
@@ -1576,13 +2137,13 @@ begin
     if not FOwner.Shares.Resolve(Paths[I], Local) then
     begin
       SendByte(FSock, 0);
-      SendStr(FSock, 'ไม่พบ "' + Paths[I] + '" หรือเลิกแชร์แล้ว');
+      SendStr(FSock, L('Not found: "', 'ไม่พบ "') + Paths[I] + L('" (or no longer shared)', '" หรือเลิกแชร์แล้ว'));
       Exit;
     end;
     AddPathItems(Local, Items, FFileCount, FTotal);
   end;
   if N = 1 then FTitle := Copy(Paths[0], LastDelimiter('/', Paths[0]) + 1, MaxInt)
-  else FTitle := Format('%d รายการ', [N]);
+  else FTitle := Format(L('%d items', '%d รายการ'), [N]);
   SendByte(FSock, 1);
   SendInt32(FSock, FFileCount);
   SendInt64(FSock, FTotal);
@@ -1592,8 +2153,8 @@ begin
     SendItems(Items);
     if RecvByte(FSock) = 1 then
     begin
-      SetState(tsDone, 'ส่งสำเร็จ');
-      Log(Format('%s ดาวน์โหลด %s (%s) จากเครื่องนี้', [FPeerName, FTitle, FormatBytes(FTotal)]));
+      SetState(tsDone, L('Sent', 'ส่งสำเร็จ'));
+      Log(Format(L('%s downloaded %s (%s) from this PC', '%s ดาวน์โหลด %s (%s) จากเครื่องนี้'), [FPeerName, FTitle, FormatBytes(FTotal)]));
     end;
   except
     on E: Exception do
@@ -1627,20 +2188,22 @@ begin
       end;
       Ver := RecvByte(FSock);
       if Ver <> PROTO_VERSION then
-        raise ENetError.CreateFmt('เครื่อง %s ใช้โปรแกรมคนละเวอร์ชัน (v%d)', [FPeerIP, Ver]);
+        raise ENetError.CreateFmt(L('%s runs a different version (v%d)', 'เครื่อง %s ใช้โปรแกรมคนละเวอร์ชัน (v%d)'), [FPeerIP, Ver]);
       Cmd := RecvByte(FSock);
       FPeerName := RecvStr(FSock);
       if FPeerName = '' then FPeerName := FPeerIP;   // sender set no name
       case Cmd of
         CMD_PUSH: HandlePush;
-        CMD_LIST: HandleList;
-        CMD_GET:  HandleGet;
+        CMD_LIST:  HandleList(False);
+        CMD_LISTX: HandleList(True);
+        CMD_GET:   HandleGet;
+        CMD_WRITE: HandleWrite;
       else
         raise ENetError.CreateFmt('Unknown command %d', [Cmd]);
       end;
     except
       on E: Exception do
-        Log('การเชื่อมต่อจาก ' + FPeerIP + ' ผิดพลาด: ' + E.Message);
+        Log(L('Connection from ', 'การเชื่อมต่อจาก ') + FPeerIP + L(' failed: ', ' ผิดพลาด: ') + E.Message);
     end;
   finally
     CloseSocket(FSock);
@@ -1673,7 +2236,7 @@ begin
   if fpbind(FSock, psockaddr(@Addr), SizeOf(Addr)) <> 0 then
   begin
     CloseSocket(FSock);
-    raise ENetError.CreateFmt('พอร์ต %d ถูกใช้งานอยู่ (เปิดโปรแกรมซ้ำหรือไม่?)', [APort]);
+    raise ENetError.CreateFmt(L('Port %d is in use (is LAN Share already open?)', 'พอร์ต %d ถูกใช้งานอยู่ (เปิดโปรแกรมซ้ำหรือไม่?)'), [APort]);
   end;
   if fplisten(FSock, 16) <> 0 then
   begin
@@ -1701,6 +2264,7 @@ begin
       1: Result := FMyID;
       2: Result := FMyIcon;
       3: Result := FThemeCss;
+      5: Result := FLang;
     else
       Result := FThemesJson;
     end;
@@ -1719,9 +2283,11 @@ begin
       1: FMyID := AValue;
       2: FMyIcon := AValue;
       3: FThemeCss := AValue;
+      5: FLang := AValue;
     else
       FThemesJson := AValue;
     end;
+    UniqueString(FLang);
     UniqueString(FMyName);
     UniqueString(FMyIcon);
     UniqueString(FThemeCss);
@@ -1923,6 +2489,27 @@ begin
   end;
 end;
 
+procedure TDiscoveryThread.RescanNow;
+begin
+  FScanNow := True;
+  Broadcast;
+end;
+
+procedure TDiscoveryThread.SetMachine(const AHost, AUser, AMachine: string);
+begin
+  EnterCriticalSection(FLock);
+  try
+    FHost := AHost;
+    FUser := AUser;
+    FMachine := AMachine;
+    UniqueString(FHost);
+    UniqueString(FUser);
+    UniqueString(FMachine);
+  finally
+    LeaveCriticalSection(FLock);
+  end;
+end;
+
 procedure TDiscoveryThread.AddTarget(const IP: string);
 begin
   if (IP = '') or (Copy(IP, 1, 4) = '127.') then Exit;
@@ -1941,16 +2528,21 @@ end;
 procedure TDiscoveryThread.DoPeer;
 begin
   if Assigned(FOnPeer) then
-    FOnPeer(Self, FPeerID, FPeerName, FPeerIP, FPeerPort, FPeerOS, FPeerCaps, FPeerIcon);
+    FOnPeer(Self, FPeerID, FPeerName, FPeerIP, FPeerPort, FPeerOS, FPeerCaps, FPeerIcon, FPeerIdent);
 end;
 
 function TDiscoveryThread.Packet: string;
+
+  function F(const S: string): string;
+  begin
+    Result := StringReplace(S, '|', '-', [rfReplaceAll]);
+  end;
+
 begin
   EnterCriticalSection(FLock);
   try
-    Result := Format('LSH2|%s|%d|%s|%s|bin,http,push|%s',
-      [FID, FTcpPort, StringReplace(FName, '|', '-', [rfReplaceAll]), GetOSName,
-       StringReplace(FIcon, '|', '-', [rfReplaceAll])]);
+    Result := Format('LSH2|%s|%d|%s|%s|bin,http,push,write|%s|%s|%s|%s|%s',
+      [FID, FTcpPort, F(FName), GetOSName, F(FIcon), F(FHost), F(FUser), F(FMachine), APP_VERSION]);
   finally
     LeaveCriticalSection(FLock);
   end;
@@ -1967,13 +2559,32 @@ begin
   fpsendto(FSock, Pointer(Msg), Length(Msg), 0, psockaddr(@Addr), SizeOf(Addr));
 end;
 
-procedure TDiscoveryThread.Broadcast;
+procedure TDiscoveryThread.DoPeerGone;
+begin
+  if Assigned(FOnPeerGone) then FOnPeerGone(Self, FPeerID);
+end;
+
+procedure TDiscoveryThread.SayGoodbye;
 var
   Msg: string;
+begin
+  Msg := 'LSH2BYE|' + FID;
+  // UDP may drop a packet: send twice
+  SendEverywhere(Msg);
+  Sleep(30);
+  SendEverywhere(Msg);
+end;
+
+procedure TDiscoveryThread.Broadcast;
+begin
+  SendEverywhere(Packet);
+end;
+
+procedure TDiscoveryThread.SendEverywhere(const Msg: string);
+var
   L: TStringArray;
   I: Integer;
 begin
-  Msg := Packet;
   SendPacket('255.255.255.255', Msg);
   // directed broadcast on each local network (needed on multi-NIC machines
   // and on macOS, where 255.255.255.255 only leaves the primary interface)
@@ -2029,8 +2640,9 @@ begin
       LastSend := GetTickCount64;
       Broadcast;
     end;
-    if (LastScan = 0) or (GetTickCount64 - LastScan >= 60000) then
+    if FScanNow or (LastScan = 0) or (GetTickCount64 - LastScan >= 60000) then
     begin
+      FScanNow := False;
       LastScan := GetTickCount64;
       ScanSubnets;
     end;
@@ -2040,7 +2652,14 @@ begin
     begin
       SetString(S, PAnsiChar(@Buf[0]), N);
       Parts := S.Split(['|']);
-      if (Length(Parts) >= 4) and (Parts[0] = 'LSH2') and (Parts[1] <> FID) then
+      if (Length(Parts) >= 2) and (Parts[0] = 'LSH2BYE') and (Parts[1] <> FID) then
+      begin
+        // a peer is closing: it may announce again later with a new id
+        FPeerID := Parts[1];
+        if FSeen.IndexOf(FPeerID) >= 0 then FSeen.Delete(FSeen.IndexOf(FPeerID));
+        Synchronize(@DoPeerGone);
+      end
+      else if (Length(Parts) >= 4) and (Parts[0] = 'LSH2') and (Parts[1] <> FID) then
       begin
         FPeerID := Parts[1];
         FPeerPort := StrToIntDef(Parts[2], DEFAULT_TCP_PORT);
@@ -2048,6 +2667,14 @@ begin
         if Length(Parts) >= 5 then FPeerOS := Parts[4] else FPeerOS := '';
         if Length(Parts) >= 6 then FPeerCaps := Parts[5] else FPeerCaps := 'bin';
         if Length(Parts) >= 7 then FPeerIcon := Parts[6] else FPeerIcon := '';
+        FPeerIdent := Default(TPeerIdent);
+        if Length(Parts) >= 11 then
+        begin
+          FPeerIdent.Host := Parts[7];
+          FPeerIdent.User := Parts[8];
+          FPeerIdent.Machine := Parts[9];
+          FPeerIdent.Version := Parts[10];
+        end;
         FPeerIP := NetAddrToStr(From.sin_addr);
         // first time we hear this peer: answer at once so it sees us too
         if FSeen.IndexOf(FPeerID) < 0 then
